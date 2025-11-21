@@ -1853,7 +1853,7 @@ def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=No
     # Apply styling to interval columns
     styled = df.style.applymap(highlight_allocation_cell, subset=INTERVAL_ORDER_11)
 
-    return styled
+    return styled, df
 
 
 def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_acres, grid_list):
@@ -1998,7 +1998,7 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
     style_cols = list(INTERVAL_ORDER_11) + ['Net Change', 'Acre Δ']
     styled = df.style.applymap(highlight_change_cell, subset=[c for c in style_cols if c in df.columns])
 
-    return styled
+    return styled, df
 
 
 def create_performance_comparison_table(champ_metrics, chall_metrics):
@@ -2731,35 +2731,59 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         else:
             st.info("**TIE!** Both strategies performed equally.")
 
-        # === ALLOCATION COMPARISON: VERTICAL STACK (Text-based for stability) ===
+        # === ALLOCATION COMPARISON: VERTICAL STACK (Styled DataFrames with Downloads) ===
         st.markdown("#### Interval Allocation Comparison")
         st.caption("Tables show allocation percentages by interval. Row Sum should be 100%.")
 
-        # Champion Table (full width, text-based)
+        # Champion Table (styled dataframe with download)
         st.markdown("**Champion (Baseline)**")
-        render_allocation_text_table(
+        champ_styled, champ_df = create_optimized_allocation_table(
             champ['allocations'], selected_grids, grid_acres=champ['acres'],
             label="CHAMPION AVERAGE"
         )
-
-        st.markdown("")  # Spacer
-
-        # Challenger Table (full width, text-based)
-        st.markdown("**Challenger (Optimized)**")
-        render_allocation_text_table(
-            chall['allocations'], selected_grids, grid_acres=chall['acres'],
-            label="OPTIMIZED AVERAGE"
+        st.dataframe(champ_styled, use_container_width=True, hide_index=True)
+        st.download_button(
+            label="Download Champion CSV",
+            data=champ_df.to_csv(index=False),
+            file_name="champion_allocations.csv",
+            mime="text/csv",
+            key="download_champion_csv"
         )
 
         st.markdown("")  # Spacer
 
-        # Change Analysis Table (full width, text-based)
+        # Challenger Table (styled dataframe with download)
+        st.markdown("**Challenger (Optimized)**")
+        chall_styled, chall_df = create_optimized_allocation_table(
+            chall['allocations'], selected_grids, grid_acres=chall['acres'],
+            label="OPTIMIZED AVERAGE"
+        )
+        st.dataframe(chall_styled, use_container_width=True, hide_index=True)
+        st.download_button(
+            label="Download Challenger CSV",
+            data=chall_df.to_csv(index=False),
+            file_name="challenger_allocations.csv",
+            mime="text/csv",
+            key="download_challenger_csv"
+        )
+
+        st.markdown("")  # Spacer
+
+        # Change Analysis Table (styled dataframe with download)
         st.markdown("**Allocation Changes by Grid and Interval**")
         st.caption("Changes show +/- percentage shifts. Net should be 0%. PORTFOLIO TOTALS shows average shifts and total acres.")
-        render_change_analysis_text_table(
+        change_styled, change_df = create_change_analysis_table(
             champ['allocations'], chall['allocations'],
             champ['acres'], chall['acres'],
             selected_grids
+        )
+        st.dataframe(change_styled, use_container_width=True, hide_index=True)
+        st.download_button(
+            label="Download Changes CSV",
+            data=change_df.to_csv(index=False),
+            file_name="allocation_changes.csv",
+            mime="text/csv",
+            key="download_changes_csv"
         )
 
         # Yearly Comparison Chart
