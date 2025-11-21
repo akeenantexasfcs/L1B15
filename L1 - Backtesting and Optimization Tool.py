@@ -3604,6 +3604,9 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
             st.divider()
             st.subheader("Details by Grid")
 
+            # Initialize collection list for aggregate audit view
+            all_grids_detail_data = []
+
             for gid in r['selected_grids']:
                 if gid in r['grid_results']:
                     with st.expander(f"{gid} ({r['grid_acres'].get(gid, 0):,} acres)"):
@@ -3617,6 +3620,39 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                             'Year': '{:.0f}', 'Total Indemnity': '${:,.0f}',
                             'Producer Premium': '${:,.0f}', 'Net Return': '${:,.0f}', 'Total ROI': '{:.2%}'
                         }), use_container_width=True)
+
+                    # Accumulate data for aggregate view
+                    grid_df = results_df.copy()
+                    grid_df.insert(0, 'Grid ID', gid)
+                    all_grids_detail_data.append(grid_df)
+
+            # Render Aggregate Portfolio Details Panel
+            if all_grids_detail_data:
+                master_audit_df = pd.concat(all_grids_detail_data, ignore_index=True)
+
+                # Reorder columns so Grid ID and Year are at the front
+                cols = master_audit_df.columns.tolist()
+                priority_cols = ['Grid ID', 'Year']
+                other_cols = [c for c in cols if c not in priority_cols]
+                master_audit_df = master_audit_df[priority_cols + other_cols]
+
+                with st.expander("📂 Aggregate Portfolio Details (Audit View)"):
+                    st.caption(f"Complete backtesting data for all {len(r['selected_grids'])} grids across all years.")
+
+                    st.dataframe(master_audit_df.style.format({
+                        'Year': '{:.0f}', 'Total Indemnity': '${:,.0f}',
+                        'Producer Premium': '${:,.0f}', 'Net Return': '${:,.0f}', 'Total ROI': '{:.2%}'
+                    }), use_container_width=True, height=400)
+
+                    # Download button for CSV export
+                    csv_data = master_audit_df.to_csv(index=False)
+                    st.download_button(
+                        label="Download Master Audit CSV",
+                        data=csv_data,
+                        file_name="portfolio_audit_details.csv",
+                        mime="text/csv",
+                        key="download_master_audit"
+                    )
 
         except Exception as e:
             st.error(f"Error: {e}")
