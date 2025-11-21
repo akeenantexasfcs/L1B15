@@ -1215,8 +1215,9 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
 
 @st.cache_data(ttl=3600)
 def run_optimization_s4(
-    _session, grid_id, start_year, end_year, plan_code, prod_factor, 
-    acres, use, coverage_levels, objective, min_intervals, max_intervals_to_test, search_depth
+    _session, grid_id, start_year, end_year, plan_code, prod_factor,
+    acres, use, coverage_levels, objective, min_intervals, max_intervals_to_test, search_depth,
+    require_full_coverage=False, interval_range_opt=(2, 6)
 ):
     # Load data
     county_base_value = load_county_base_value(_session, grid_id)
@@ -1529,7 +1530,37 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
         col2.caption("Shifts intervals by 1-2 months")
     elif search_depth == 'incremental':
         col2.caption("Small fine-tuning: ±1-5% adjustments")
-    
+
+    # === DIVERSIFICATION CONSTRAINTS ===
+    st.markdown("**Diversification Constraints:**")
+
+    div_col1, div_col2 = st.columns(2)
+
+    with div_col1:
+        require_full_coverage = st.checkbox(
+            "📅 Ensure Full Calendar Coverage",
+            value=False,
+            key="s4_full_coverage",
+            help="Creates staggered portfolio with Pattern A (6 intervals) and Pattern B (5 intervals) to cover all 11 intervals while maintaining non-adjacency. Requires at least 2 grids."
+        )
+
+    with div_col2:
+        if not require_full_coverage:
+            interval_range_opt = st.slider(
+                "Number of Active Intervals Range",
+                min_value=2,
+                max_value=6,
+                value=(2, 6),
+                key="s4_interval_range",
+                help="Optimizer can choose ANY number of intervals within this range. Each interval must have 10%-50%."
+            )
+        else:
+            interval_range_opt = (11, 11)
+            st.info("Full coverage mode: All 11 intervals will be covered across grids")
+
+    st.caption("💡 Diversification constraints help ensure temporal coverage across the policy year. "
+               "Full calendar coverage distributes intervals across multiple grids to maximize protection timing.")
+
     st.divider()
 
     if 'tab4_run' not in st.session_state:
@@ -1571,9 +1602,10 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                         acres_for_grid = grid_acres.get(gid, total_insured_acres)
                         
                         results_df, rate_year, strategy_count = run_optimization_s4(
-                            session, gid, start_year, end_year, plan_code, 
-                            productivity_factor, acres_for_grid, intended_use, 
-                            coverage_levels, objective, min_intervals, max_intervals_to_test, search_depth
+                            session, gid, start_year, end_year, plan_code,
+                            productivity_factor, acres_for_grid, intended_use,
+                            coverage_levels, objective, min_intervals, max_intervals_to_test, search_depth,
+                            require_full_coverage, interval_range_opt
                         )
                         
                         if not results_df.empty:
@@ -1602,7 +1634,9 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                 "multi_grid_mode": multi_grid_mode,
                 "correlation_matrix": correlation_matrix,
                 "search_depth": search_depth,
-                "grid_acres": grid_acres
+                "grid_acres": grid_acres,
+                "require_full_coverage": require_full_coverage,
+                "interval_range_opt": interval_range_opt
             }
             st.session_state.tab1_results = None
             st.session_state.tab2_results = None
