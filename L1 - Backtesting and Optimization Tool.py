@@ -1758,7 +1758,54 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     """
     Unified Portfolio Strategy tab implementing Champion vs Challenger workflow.
     """
+
+    # ==========================================================================
+    # CALLBACK FUNCTIONS (Must be defined before widgets that use them)
+    # ==========================================================================
+    def load_king_ranch_callback():
+        """Callback to load King Ranch preset - runs BEFORE page reloads."""
+        try:
+            all_grids_for_callback = load_distinct_grids(session)
+
+            target_grid_mapping = {}
+            for county, grid_ids in KING_RANCH_PRESET['counties'].items():
+                for gid_num in grid_ids:
+                    target_grid_mapping[gid_num] = f"{gid_num} ({county} - TX)"
+
+            preset_grid_ids = []
+            for numeric_id in KING_RANCH_PRESET['grids']:
+                target_str = target_grid_mapping.get(numeric_id, "")
+                if target_str in all_grids_for_callback:
+                    preset_grid_ids.append(target_str)
+                else:
+                    for grid_option in all_grids_for_callback:
+                        if extract_numeric_grid_id(grid_option) == numeric_id:
+                            preset_grid_ids.append(grid_option)
+                            break
+
+            # Set session state values - this happens BEFORE the page reloads
+            st.session_state.ps_grids = preset_grid_ids
+            st.session_state.productivity_factor = 1.35
+
+            # Set acres for each grid
+            for gid in preset_grid_ids:
+                numeric_id = extract_numeric_grid_id(gid)
+                st.session_state[f"ps_champ_acres_{gid}"] = KING_RANCH_PRESET['acres'].get(numeric_id, total_insured_acres)
+
+            st.session_state.ps_kr_loaded = True
+
+        except Exception as e:
+            st.session_state.ps_kr_error = str(e)
+
     st.subheader("Portfolio Strategy: Champion vs. Challenger")
+
+    # Show success/error messages from callback
+    if st.session_state.get('ps_kr_loaded', False):
+        st.success("King Ranch preset loaded!")
+        st.session_state.ps_kr_loaded = False  # Reset flag
+    if st.session_state.get('ps_kr_error'):
+        st.error(f"Error loading King Ranch: {st.session_state.ps_kr_error}")
+        st.session_state.ps_kr_error = None  # Reset error
 
     # ==========================================================================
     # TOP SECTION: GLOBAL SETTINGS
@@ -1772,8 +1819,15 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         all_grids = [grid_id]
 
     col1, col2 = st.columns([3, 1])
+
+    with col2:
+        # Button with on_click callback - triggers BEFORE page reloads
+        st.button("Load King Ranch", key="ps_load_kr", on_click=load_king_ranch_callback)
+
     with col1:
         default_grids = st.session_state.get('ps_grids', [grid_id])
+        # Ensure default_grids only contains valid options
+        default_grids = [g for g in default_grids if g in all_grids]
         selected_grids = st.multiselect(
             "Select Grids for Portfolio",
             options=all_grids,
@@ -1781,32 +1835,6 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
             max_selections=20,
             key="ps_grids"
         )
-
-    with col2:
-        if st.button("Load King Ranch", key="ps_load_kr"):
-            try:
-                target_grid_mapping = {}
-                for county, grid_ids in KING_RANCH_PRESET['counties'].items():
-                    for gid_num in grid_ids:
-                        target_grid_mapping[gid_num] = f"{gid_num} ({county} - TX)"
-
-                preset_grid_ids = []
-                for numeric_id in KING_RANCH_PRESET['grids']:
-                    target_str = target_grid_mapping[numeric_id]
-                    if target_str in all_grids:
-                        preset_grid_ids.append(target_str)
-                    else:
-                        for grid_option in all_grids:
-                            if extract_numeric_grid_id(grid_option) == numeric_id:
-                                preset_grid_ids.append(grid_option)
-                                break
-
-                st.session_state.ps_grids = preset_grid_ids
-                st.session_state.productivity_factor = 1.35
-                st.success("King Ranch loaded!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
 
     if not selected_grids:
         st.warning("Select at least one grid to continue.")
@@ -1908,7 +1936,7 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Cumulative ROI", f"{metrics.get('cumulative_roi', 0):.1%}")
         col2.metric("Risk-Adj Return", f"{metrics.get('risk_adj_return', 0):.2f}")
-        col3.metric("Total Profit", f"${metrics.get('total_profit', 0):,.0f}")
+        col3.metric("Avg Annual Premium", f"${metrics.get('avg_annual_premium', 0):,.0f}")
         col4.metric("Win Rate", f"{metrics.get('profitable_pct', 0):.0%}")
 
     st.divider()
