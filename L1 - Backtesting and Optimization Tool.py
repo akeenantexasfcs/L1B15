@@ -1755,8 +1755,6 @@ def generate_base_data_for_mvo(session, selected_grids, grid_results_with_alloca
 
 
 def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=None,
-                                       session=None, productivity_factor=None,
-                                       intended_use=None, plan_code=None, coverage_level=None,
                                        label="OPTIMIZED AVERAGE"):
     """
     Create a styled allocation table for Champion or Challenger.
@@ -1765,17 +1763,14 @@ def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=No
         allocations_dict: Dict mapping grid_id -> {interval: weight (0-1), ...}
         grid_list: List of grid IDs to include
         grid_acres: Optional dict of grid_id -> acres
-        session: Optional Snowflake session for premium calculation
-        productivity_factor, intended_use, plan_code, coverage_level: Optional params for premium calc
         label: Label for the summary row (default "OPTIMIZED AVERAGE")
 
     Returns:
-        Styled pandas DataFrame ready for display
+        Tuple of (styled DataFrame, raw DataFrame)
     """
     rows = []
     total_coverage = {interval: 0 for interval in INTERVAL_ORDER_11}
     total_acres = 0
-    total_premium = 0
 
     for gid in grid_list:
         alloc = allocations_dict.get(gid, {})
@@ -1800,22 +1795,6 @@ def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=No
         total_acres += acres
         row['Acres'] = f"{acres:,.0f}"
 
-        # Calculate annual premium if session and params available
-        grid_premium = 0
-        if session and productivity_factor and coverage_level:
-            try:
-                # Try to calculate premium using existing function
-                _, grid_breakdown = calculate_annual_premium_cost(
-                    session, [gid], {gid: acres},
-                    {gid: {'allocation': alloc}},
-                    productivity_factor, intended_use, plan_code
-                )
-                grid_premium = grid_breakdown.get(gid, 0)
-            except:
-                grid_premium = 0
-        total_premium += grid_premium
-        row['Annual Premium ($)'] = f"${grid_premium:,.0f}"
-
         rows.append(row)
 
     # Add summary row (OPTIMIZED AVERAGE or PORTFOLIO AVERAGE)
@@ -1830,7 +1809,6 @@ def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=No
 
     avg_row['Row Sum'] = f"{avg_row_sum:.0f}%"
     avg_row['Acres'] = f"{total_acres:,.0f}"
-    avg_row['Annual Premium ($)'] = f"${total_premium:,.0f}"
     rows.append(avg_row)
 
     df = pd.DataFrame(rows)
