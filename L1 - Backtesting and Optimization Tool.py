@@ -1074,8 +1074,8 @@ def apply_budget_constraint(grid_acres, total_cost, budget_limit, session, selec
     if total_cost == 0:
         return grid_acres.copy(), 1.0
 
-    # Apply 0.5% safety margin to prevent edge cases
-    SAFETY_MARGIN = 0.995
+    # Apply 0.1% safety margin to prevent edge cases
+    SAFETY_MARGIN = 0.999
     effective_budget = budget_limit * SAFETY_MARGIN
     MAX_ITERATIONS = 20
     ADJUSTMENT_STEP = 0.001  # 0.1% adjustment per iteration
@@ -2460,6 +2460,11 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     Unified Portfolio Strategy tab implementing Champion vs Challenger workflow.
     """
 
+    # Ensure we have the latest productivity factor from sidebar widget
+    # This fixes the double-click issue where the parameter value could be stale
+    if 'sidebar_prod_factor' in st.session_state:
+        productivity_factor = int(st.session_state.sidebar_prod_factor.replace('%', '')) / 100.0
+
     # ==========================================================================
     # CALLBACK FUNCTIONS (Must be defined before widgets that use them)
     # ==========================================================================
@@ -3101,11 +3106,11 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                     )
 
                     if scale_factor < 1.0:
-                        st.info(f"Acres scaled DOWN by {scale_factor:.1%} to fit budget (premium was ${total_cost:,.0f})")
+                        st.info(f"Acres scaled DOWN by {scale_factor:.1%} to fit budget")
                     elif scale_factor > 1.0:
-                        st.success(f"Acres scaled UP by {scale_factor:.1%} to fill budget (premium was ${total_cost:,.0f}, budget is ${annual_budget:,.0f})")
+                        st.success(f"Acres scaled UP by {scale_factor:.1%} to fill budget")
                     else:
-                        st.info(f"Budget constraint not binding (premium ${total_cost:,.0f} within budget ${annual_budget:,.0f})")
+                        st.info(f"Budget constraint not binding")
 
                 # ===== STEP 3: Final Backtest =====
                 st.write("**Step 3: Running Final Challenger Backtest...**")
