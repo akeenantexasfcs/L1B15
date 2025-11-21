@@ -7,6 +7,20 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
 from scipy.optimize import minimize
+from decimal import Decimal, ROUND_HALF_UP
+
+# === ROUNDING HELPER ===
+def round_half_up(value, decimals=2):
+    """
+    Round using 'round half up' to match PRF official tool.
+    Python's built-in round() uses banker's rounding (12.675 -> 12.67).
+    PRF Tool uses round half up (12.675 -> 12.68).
+    """
+    if decimals == 2:
+        return float(Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+    else:
+        quantize_str = '0.' + '0' * decimals
+        return float(Decimal(str(value)).quantize(Decimal(quantize_str), rounding=ROUND_HALF_UP))
 
 # === GLOBAL CONSTANT ===
 # The 11 valid PRF intervals
@@ -1525,7 +1539,7 @@ def render_tab2(session, grid_id, intended_use, productivity_factor, total_insur
                 actuals_df['INDEX_VALUE'] = pd.to_numeric(actuals_df['INDEX_VALUE'], errors='coerce')
 
                 dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
-                dollar_amount_of_protection = round(dollar_amount_of_protection, 2)
+                dollar_amount_of_protection = round_half_up(dollar_amount_of_protection, 2)
                 total_policy_protection = dollar_amount_of_protection * total_insured_acres
 
                 roi_df = pd.DataFrame(index=INTERVAL_ORDER_11)
@@ -3137,7 +3151,7 @@ def render_tab3(session, grid_id, intended_use, productivity_factor, total_insur
                 current_rate_year = get_current_rate_year(session)
                 premium_rates_df = load_premium_rates(session, grid_id, intended_use, [coverage_level], current_rate_year)[coverage_level]
                 dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
-                dollar_amount_of_protection = round(dollar_amount_of_protection, 2)
+                dollar_amount_of_protection = round_half_up(dollar_amount_of_protection, 2)
                 total_policy_protection = dollar_amount_of_protection * total_insured_acres
                 all_indices_df = load_all_indices(session, grid_id)
                 
@@ -3445,7 +3459,7 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                         current_rate_year = get_current_rate_year(session)
                         premium_rates_df = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
                         dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
-                        dollar_amount_of_protection = round(dollar_amount_of_protection, 2)
+                        dollar_amount_of_protection = round_half_up(dollar_amount_of_protection, 2)
                         total_policy_protection = dollar_amount_of_protection * grid_acres[gid]
                         all_indices_df = load_all_indices(session, gid)
 
@@ -3814,7 +3828,7 @@ def run_optimization_s4(
         subsidy = all_subsidies[coverage_level]
         premiums = all_premiums[coverage_level]
         dollar_protection = county_base_value * coverage_level * prod_factor
-        dollar_protection = round(dollar_protection, 2)
+        dollar_protection = round_half_up(dollar_protection, 2)
         total_protection = dollar_protection * acres
         
         year_rois = []
