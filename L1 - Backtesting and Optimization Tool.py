@@ -1938,28 +1938,51 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
         ch_alloc = chall_alloc.get(gid, {})
         row = {'Grid': gid}
 
+        # Check if grid is only in one portfolio
+        in_champ = gid in champ_alloc or gid in champ_acres
+        in_chall = gid in chall_alloc or gid in chall_acres
+
         # Allocation changes for each interval
         for interval in INTERVAL_ORDER_11:
-            c_val = c_alloc.get(interval, 0)
-            ch_val = ch_alloc.get(interval, 0)
-
-            # Convert to percentage if decimal
-            c_pct = c_val * 100 if isinstance(c_val, (int, float)) and c_val <= 1 else (c_val if isinstance(c_val, (int, float)) else 0)
-            ch_pct = ch_val * 100 if isinstance(ch_val, (int, float)) and ch_val <= 1 else (ch_val if isinstance(ch_val, (int, float)) else 0)
-
-            change = ch_pct - c_pct
-            total_changes[interval] += change
-
-            # Format: "+50%", "-50%", or "0%" (NOT "--")
-            if change > 0:
-                row[interval] = f"+{change:.0f}%"
-            elif change < 0:
-                row[interval] = f"{change:.0f}%"
+            if not in_champ and in_chall:
+                # Grid only in Challenger - show "NEW"
+                ch_val = ch_alloc.get(interval, 0)
+                ch_pct = ch_val * 100 if isinstance(ch_val, (int, float)) and ch_val <= 1 else (ch_val if isinstance(ch_val, (int, float)) else 0)
+                row[interval] = f"+{ch_pct:.0f}%" if ch_pct > 0 else "0%"
+                total_changes[interval] += ch_pct
+            elif in_champ and not in_chall:
+                # Grid only in Champion - show "REMOVED"
+                c_val = c_alloc.get(interval, 0)
+                c_pct = c_val * 100 if isinstance(c_val, (int, float)) and c_val <= 1 else (c_val if isinstance(c_val, (int, float)) else 0)
+                row[interval] = f"-{c_pct:.0f}%" if c_pct > 0 else "0%"
+                total_changes[interval] -= c_pct
             else:
-                row[interval] = "0%"
+                # Grid in both portfolios - show change
+                c_val = c_alloc.get(interval, 0)
+                ch_val = ch_alloc.get(interval, 0)
 
-        # Net Change column (always 0% since portfolio stays at 100%)
-        row['Net Change'] = "0%"
+                # Convert to percentage if decimal
+                c_pct = c_val * 100 if isinstance(c_val, (int, float)) and c_val <= 1 else (c_val if isinstance(c_val, (int, float)) else 0)
+                ch_pct = ch_val * 100 if isinstance(ch_val, (int, float)) and ch_val <= 1 else (ch_val if isinstance(ch_val, (int, float)) else 0)
+
+                change = ch_pct - c_pct
+                total_changes[interval] += change
+
+                # Format: "+50%", "-50%", or "0%" (NOT "--")
+                if change > 0:
+                    row[interval] = f"+{change:.0f}%"
+                elif change < 0:
+                    row[interval] = f"{change:.0f}%"
+                else:
+                    row[interval] = "0%"
+
+        # Net Change column
+        if not in_champ and in_chall:
+            row['Net Change'] = "NEW"
+        elif in_champ and not in_chall:
+            row['Net Change'] = "REMOVED"
+        else:
+            row['Net Change'] = "0%"
 
         # Acreage columns
         c_acres = champ_acres.get(gid, 0)
@@ -1969,11 +1992,16 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
         total_champ_acres += c_acres
         total_chall_acres += ch_acres
 
-        row['Champ Acres'] = f"{c_acres:,.0f}"
-        row['Chall Acres'] = f"{ch_acres:,.0f}"
+        # Format acres - show "N/A" if grid not in that portfolio
+        row['Champ Acres'] = f"{c_acres:,.0f}" if in_champ else "N/A"
+        row['Chall Acres'] = f"{ch_acres:,.0f}" if in_chall else "N/A"
 
         # Format acre change with +/- or 0
-        if acre_change > 0:
+        if not in_champ and in_chall:
+            row['Acre Δ'] = f"+{ch_acres:,.0f}"
+        elif in_champ and not in_chall:
+            row['Acre Δ'] = f"-{c_acres:,.0f}"
+        elif acre_change > 0:
             row['Acre Δ'] = f"+{acre_change:,.0f}"
         elif acre_change < 0:
             row['Acre Δ'] = f"{acre_change:,.0f}"
@@ -2471,7 +2499,8 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                 'grid_results': champion_grid_results,
                 'metrics': champion_metrics,
                 'allocations': champion_allocations,
-                'acres': champion_acres
+                'acres': champion_acres,
+                'grids': selected_grids  # Store champion's grid list
             }
             st.success("Champion backtest complete!")
 
@@ -2493,6 +2522,62 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     # ==========================================================================
     st.markdown("### The Challenger (AI Optimizer)")
     st.caption("Configure the AI optimizer to find a better strategy.")
+
+    # --------------------------------------------------------------------------
+    # Challenger Grid Selection (independent from Champion)
+    # --------------------------------------------------------------------------
+    st.markdown("**Challenger Portfolio Structure:**")
+
+    # Default challenger grids to match Global Settings grids
+    default_challenger_grids = st.session_state.get('ps_challenger_grids', selected_grids)
+    default_challenger_grids = [g for g in default_challenger_grids if g in all_grids]
+    if not default_challenger_grids:
+        default_challenger_grids = selected_grids
+
+    challenger_grids = st.multiselect(
+        "Select Grids for Challenger Portfolio",
+        options=all_grids,
+        default=default_challenger_grids,
+        max_selections=20,
+        help="Challenger can use a different grid mix than Champion. Defaults to Global Settings grids.",
+        key="ps_challenger_grids"
+    )
+
+    if not challenger_grids:
+        st.warning("Select at least one grid for the Challenger portfolio.")
+        return
+
+    # --------------------------------------------------------------------------
+    # Challenger Acreage (parsimonious default with optional override)
+    # --------------------------------------------------------------------------
+    # Default: equal distribution of total_insured_acres
+    default_acres_per_grid = total_insured_acres / len(challenger_grids)
+
+    override_challenger_acres = st.checkbox(
+        "Override Challenger Acres",
+        value=False,
+        help="Manually set acres for each Challenger grid. Otherwise, total insured acres are distributed equally.",
+        key="ps_override_challenger_acres"
+    )
+
+    challenger_acres = {}
+    if override_challenger_acres:
+        acre_cols = st.columns(min(4, len(challenger_grids)))
+        for idx, gid in enumerate(challenger_grids):
+            with acre_cols[idx % 4]:
+                challenger_acres[gid] = st.number_input(
+                    f"{gid}",
+                    min_value=1,
+                    value=int(default_acres_per_grid),
+                    step=10,
+                    key=f"ps_chall_acres_{gid}"
+                )
+    else:
+        for gid in challenger_grids:
+            challenger_acres[gid] = default_acres_per_grid
+        st.caption(f"Challenger acres: {default_acres_per_grid:,.0f} acres per grid ({total_insured_acres:,.0f} total ÷ {len(challenger_grids)} grids)")
+
+    st.markdown("---")
 
     # Layer 1: Interval Optimization
     st.markdown("**Layer 1: Interval Optimization**")
@@ -2629,15 +2714,16 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                 challenger_allocations = {}
                 challenger_interval_stats = {}
 
-                for idx, gid in enumerate(selected_grids):
+                # Use challenger_grids (may differ from Champion's selected_grids)
+                for idx, gid in enumerate(challenger_grids):
                     progress_bar.progress(
-                        (idx + 1) / len(selected_grids),
+                        (idx + 1) / len(challenger_grids),
                         text=f"Optimizing intervals for {gid}..."
                     )
 
                     best_alloc, best_roi, tested = run_fast_optimization_core(
                         session, gid, start_year, end_year, plan_code,
-                        productivity_factor, champion_acres[gid], intended_use,
+                        productivity_factor, challenger_acres[gid], intended_use,
                         coverage_level, search_iterations, search_mode,
                         require_full_coverage=require_full_coverage,
                         interval_range_opt=interval_range_opt,
@@ -2652,33 +2738,25 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                             'allocation': best_alloc
                         }
                     else:
-                        # Fallback to champion allocation
-                        challenger_allocations[gid] = champion_allocations[gid]
+                        # Fallback to naive allocation (no champion reference for different grids)
+                        naive_alloc = {interval: 0.0 for interval in INTERVAL_ORDER_11}
+                        for i, interval in enumerate([0, 2, 4, 6, 8]):
+                            naive_alloc[INTERVAL_ORDER_11[interval]] = 0.20
+                        challenger_allocations[gid] = naive_alloc
 
                 progress_bar.empty()
                 st.success(f"Interval optimization complete! Tested {sum(s['tested'] for s in challenger_interval_stats.values()):,} strategies.")
 
                 # ===== STEP 2: Acreage Optimization =====
-                challenger_acres = champion_acres.copy()  # Start with champion acres
+                # challenger_acres already defined from UI (default or manual override)
+                initial_challenger_acres = challenger_acres.copy()
 
                 if optimize_acreage:
                     st.write("**Step 2: Optimizing Acreage Distribution (MVO)...**")
 
-                    # Generate base_data_df for MVO
-                    grid_results_for_mvo = {
-                        gid: {'best_strategy': {'allocation': challenger_allocations[gid], 'coverage_level': coverage_level}}
-                        for gid in selected_grids
-                    }
-
-                    base_data_df = generate_base_data_for_mvo(
-                        session, selected_grids, {'allocation': challenger_allocations[gid] for gid in selected_grids},
-                        start_year, end_year, coverage_level, productivity_factor,
-                        intended_use, plan_code
-                    )
-
-                    # Fix: Build proper grid_results structure for MVO
+                    # Build proper grid_results structure for MVO using challenger_grids
                     grid_results_for_mvo = {}
-                    for gid in selected_grids:
+                    for gid in challenger_grids:
                         grid_results_for_mvo[gid] = {
                             'best_strategy': {
                                 'allocation': challenger_allocations[gid],
@@ -2686,9 +2764,9 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                             }
                         }
 
-                    # Regenerate base_data_df properly
+                    # Regenerate base_data_df properly using challenger_grids
                     base_data_rows = []
-                    for gid in selected_grids:
+                    for gid in challenger_grids:
                         if gid in challenger_interval_stats:
                             # Use the stats we already computed
                             allocation = challenger_allocations[gid]
@@ -2741,16 +2819,16 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                     if enable_budget:
                         # MVO with budget constraint
                         challenger_acres, roi_corr = optimize_grid_allocation(
-                            base_data_df, grid_results_for_mvo, champion_acres,
+                            base_data_df, grid_results_for_mvo, initial_challenger_acres,
                             annual_budget, session, productivity_factor, intended_use, plan_code,
-                            selected_grids, risk_aversion, max_turnover
+                            challenger_grids, risk_aversion, max_turnover
                         )
                     else:
                         # MVO without budget - use optimize_without_budget
-                        total_acres = sum(champion_acres.values())
+                        total_acres = sum(initial_challenger_acres.values())
                         challenger_acres = optimize_without_budget(
                             base_data_df, grid_results_for_mvo, total_acres,
-                            selected_grids, risk_aversion, max_turnover
+                            challenger_grids, risk_aversion, max_turnover
                         )
 
                     st.success("Acreage optimization complete!")
@@ -2758,20 +2836,20 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                 elif enable_budget:
                     st.write("**Step 2: Applying Budget Constraint...**")
 
-                    # Calculate current cost with optimized intervals
+                    # Calculate current cost with optimized intervals using challenger_grids
                     grid_results_for_cost = {
                         gid: {'best_strategy': {'allocation': challenger_allocations[gid], 'coverage_level': coverage_level}}
-                        for gid in selected_grids
+                        for gid in challenger_grids
                     }
 
                     total_cost, _ = calculate_annual_premium_cost(
-                        session, selected_grids, champion_acres, grid_results_for_cost,
+                        session, challenger_grids, initial_challenger_acres, grid_results_for_cost,
                         productivity_factor, intended_use, plan_code
                     )
 
                     # Apply proportional scaling
                     challenger_acres, scale_factor = apply_budget_constraint(
-                        champion_acres, total_cost, annual_budget
+                        initial_challenger_acres, total_cost, annual_budget
                     )
 
                     if scale_factor < 1.0:
@@ -2781,7 +2859,7 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                 st.write("**Step 3: Running Final Challenger Backtest...**")
 
                 challenger_df, challenger_grid_results, challenger_metrics = run_portfolio_backtest(
-                    session, selected_grids, challenger_allocations, challenger_acres,
+                    session, challenger_grids, challenger_allocations, challenger_acres,
                     start_year, end_year, coverage_level, productivity_factor,
                     intended_use, plan_code, selected_scenario
                 )
@@ -2792,7 +2870,8 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                     'metrics': challenger_metrics,
                     'allocations': challenger_allocations,
                     'acres': challenger_acres,
-                    'interval_stats': challenger_interval_stats
+                    'interval_stats': challenger_interval_stats,
+                    'grids': challenger_grids  # Store challenger's grid list
                 }
 
                 st.success("Challenger training complete!")
@@ -2835,12 +2914,23 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
 
         # === ALLOCATION COMPARISON: VERTICAL STACK (Styled DataFrames with Downloads) ===
         st.markdown("#### Interval Allocation Comparison")
+
+        # Get grids from stored results (may differ between Champion and Challenger)
+        champ_grids = champ.get('grids', selected_grids)
+        chall_grids = chall.get('grids', selected_grids)
+
+        # Check if grids differ between portfolios
+        grids_differ = set(champ_grids) != set(chall_grids)
+        if grids_differ:
+            st.info(f"Note: Champion uses {len(champ_grids)} grids, Challenger uses {len(chall_grids)} grids. "
+                    "Tables show each portfolio's grids; change analysis shows the union of all grids.")
+
         st.caption("Tables show allocation percentages by interval. Row Sum should be 100%.")
 
         # Champion Table (styled dataframe with download)
         st.markdown("**Champion (Baseline)**")
         champ_styled, champ_df = create_optimized_allocation_table(
-            champ['allocations'], selected_grids, grid_acres=champ['acres'],
+            champ['allocations'], champ_grids, grid_acres=champ['acres'],
             label="CHAMPION AVERAGE"
         )
         st.dataframe(champ_styled, use_container_width=True, hide_index=True)
@@ -2857,7 +2947,7 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         # Challenger Table (styled dataframe with download)
         st.markdown("**Challenger (Optimized)**")
         chall_styled, chall_df = create_optimized_allocation_table(
-            chall['allocations'], selected_grids, grid_acres=chall['acres'],
+            chall['allocations'], chall_grids, grid_acres=chall['acres'],
             label="OPTIMIZED AVERAGE"
         )
         st.dataframe(chall_styled, use_container_width=True, hide_index=True)
@@ -2872,12 +2962,16 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         st.markdown("")  # Spacer
 
         # Change Analysis Table (styled dataframe with download)
+        # Use UNION of grids for change analysis
+        all_grids_union = list(set(champ_grids) | set(chall_grids))
+        all_grids_union.sort()  # Sort for consistent ordering
+
         st.markdown("**Allocation Changes by Grid and Interval**")
-        st.caption("Changes show +/- percentage shifts. Net should be 0%. PORTFOLIO TOTALS shows average shifts and total acres.")
+        st.caption("Changes show +/- percentage shifts. Grids in only one portfolio show as N/A for the other. PORTFOLIO TOTALS shows average shifts and total acres.")
         change_styled, change_df = create_change_analysis_table(
             champ['allocations'], chall['allocations'],
             champ['acres'], chall['acres'],
-            selected_grids
+            all_grids_union
         )
         st.dataframe(change_styled, use_container_width=True, hide_index=True)
         st.download_button(
@@ -2888,16 +2982,6 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
             key="download_changes_csv"
         )
 
-        # Yearly Comparison Chart
-        st.markdown("#### Yearly ROI Comparison")
-
-        if len(champ['df']) > 0 and len(chall['df']) > 0:
-            chart_data = pd.DataFrame({
-                'Year': champ['df']['Year'],
-                'Champion ROI': champ['df']['ROI'] * 100,
-                'Challenger ROI': chall['df']['ROI'] * 100
-            })
-            st.line_chart(chart_data.set_index('Year'))
 
 
 # =============================================================================
