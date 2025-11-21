@@ -484,214 +484,323 @@ def generate_incremental_variations(base_allocation_dict):
     return variations
 
 # =============================================================================
-# === PORTFOLIO OPTIMIZATION FUNCTIONS ===
+# === PORTFOLIO OPTIMIZATION FUNCTIONS (Vectorized) ===
 # =============================================================================
 
-def generate_random_allocation(num_intervals=5, seed=None):
+import random
+
+# Minimum allocation per interval (10%)
+MIN_ALLOCATION = 0.10
+# Number of intervals (11 bi-monthly periods)
+INTERVAL_RANGE = 11
+
+def generate_random_valid_allocation(min_allocation=MIN_ALLOCATION, interval_range=INTERVAL_RANGE):
     """
-    Generate a random valid allocation with whole number percentages.
-    Returns allocation as a dictionary with decimal values (0.20 = 20%).
-    Rules: 10-50% per interval, total = 100%, no adjacent intervals.
+    Generate a random valid allocation as a numpy array.
+    Rules: 10-50% per interval, non-adjacent, total = 100%.
+    Returns numpy array of length 11.
     """
-    import random
-    if seed is not None:
-        random.seed(seed)
+    weights = np.zeros(interval_range)
 
-    # Try to generate valid allocation
-    for _ in range(100):  # Max attempts
-        # Select random non-adjacent intervals
-        available = INTERVAL_ORDER_11.copy()
-        selected = []
-
-        for _ in range(num_intervals):
-            if not available:
-                break
-            interval = random.choice(available)
-            selected.append(interval)
-
-            # Remove this interval and adjacent ones from available
-            idx = INTERVAL_ORDER_11.index(interval)
-            to_remove = [interval]
-            # Adjacent before
-            prev_idx = (idx - 1) % len(INTERVAL_ORDER_11)
-            to_remove.append(INTERVAL_ORDER_11[prev_idx])
-            # Adjacent after
-            next_idx = (idx + 1) % len(INTERVAL_ORDER_11)
-            to_remove.append(INTERVAL_ORDER_11[next_idx])
-
-            available = [i for i in available if i not in to_remove]
-
-        if len(selected) < num_intervals:
-            continue
-
-        # Check for adjacency
-        if has_adjacent_intervals_in_list(selected):
-            continue
-
-        # Generate random percentages that sum to 100 with whole numbers
-        # Each interval: 10-50%, total = 100
-        remaining = 100
-        percentages = []
-
-        for i in range(len(selected) - 1):
-            max_for_this = min(50, remaining - 10 * (len(selected) - i - 1))
-            min_for_this = max(10, remaining - 50 * (len(selected) - i - 1))
-
-            if min_for_this > max_for_this:
-                break
-
-            pct = random.randint(min_for_this, max_for_this)
-            percentages.append(pct)
-            remaining -= pct
-
-        if len(percentages) < len(selected) - 1:
-            continue
-
-        # Last interval gets the remainder
-        if remaining >= 10 and remaining <= 50:
-            percentages.append(remaining)
-        else:
-            continue
-
-        # Create allocation dict
-        alloc = {selected[i]: percentages[i] / 100.0 for i in range(len(selected))}
-
-        if is_valid_allocation(alloc):
-            return alloc
-
-    # Fallback: return a safe default allocation
-    return {'Mar-Apr': 0.35, 'May-Jun': 0.35, 'Sep-Oct': 0.30}
-
-def generate_naive_allocation(num_intervals=5):
-    """
-    Generate a naive equal distribution across non-adjacent intervals.
-    Starts from the most commonly productive intervals.
-    """
-    # Start with commonly productive intervals (spread across the year)
-    base_intervals = ['Jan-Feb', 'Mar-Apr', 'May-Jun', 'Jul-Aug', 'Sep-Oct', 'Nov-Dec']
-
-    # Select non-adjacent intervals
+    # Randomly select 3-6 non-adjacent intervals
+    num_intervals = random.choice([3, 4, 5, 6])
+    available = list(range(interval_range))
     selected = []
-    for interval in base_intervals:
-        if len(selected) >= num_intervals:
+
+    for _ in range(num_intervals):
+        if not available:
             break
-        if not selected or not any(is_adjacent(interval, s) for s in selected):
-            selected.append(interval)
+        idx = random.choice(available)
+        selected.append(idx)
 
-    # Equal distribution with whole numbers
-    base_pct = 100 // len(selected)
-    remainder = 100 - (base_pct * len(selected))
+        # Remove this index and adjacent ones
+        to_remove = [idx]
+        if idx > 0:
+            to_remove.append(idx - 1)
+        if idx < interval_range - 1:
+            to_remove.append(idx + 1)
+        # Handle wrap-around (but we allow Nov-Dec/Jan-Feb adjacency)
+        available = [i for i in available if i not in to_remove]
 
-    alloc = {}
-    for i, interval in enumerate(selected):
-        pct = base_pct + (1 if i < remainder else 0)
-        alloc[interval] = pct / 100.0
+    if len(selected) < 2:
+        # Fallback to safe default
+        selected = [2, 4, 8]  # Mar-Apr, May-Jun, Sep-Oct
 
-    return alloc
+    # Generate random percentages
+    remaining = 100
+    for i, idx in enumerate(selected[:-1]):
+        max_pct = min(50, remaining - min_allocation * 100 * (len(selected) - i - 1))
+        min_pct = max(min_allocation * 100, remaining - 50 * (len(selected) - i - 1))
 
-def run_portfolio_optimization(
-    session, grid_id, start_year, end_year, plan_code, productivity_factor,
-    acres, intended_use, coverage_level, iterations=3000, use_marginal=False
+        if min_pct > max_pct:
+            pct = min_pct
+        else:
+            pct = random.randint(int(min_pct), int(max_pct))
+
+        weights[idx] = pct / 100.0
+        remaining -= pct
+
+    # Last interval gets remainder
+    if remaining >= 10 and remaining <= 50:
+        weights[selected[-1]] = remaining / 100.0
+    else:
+        weights[selected[-1]] = 0.20
+        # Normalize
+        if weights.sum() > 0:
+            weights = weights / weights.sum()
+
+    return weights
+
+def generate_naive_weights(min_allocation=MIN_ALLOCATION, interval_range=INTERVAL_RANGE):
+    """
+    Generate naive equal distribution across non-adjacent intervals.
+    Returns numpy array of length 11.
+    """
+    weights = np.zeros(interval_range)
+
+    # Select spread-out intervals: Jan-Feb(0), Mar-Apr(2), May-Jun(4), Jul-Aug(6), Sep-Oct(8)
+    selected_indices = [0, 2, 4, 6, 8]
+
+    # Equal distribution
+    pct_each = 1.0 / len(selected_indices)
+    for idx in selected_indices:
+        weights[idx] = pct_each
+
+    # Round to 1% increments
+    weights = np.round(weights / 0.01) * 0.01
+
+    # Fix rounding
+    diff = 1.0 - weights.sum()
+    if abs(diff) > 0.001:
+        weights[selected_indices[0]] += diff
+
+    return weights
+
+def generate_marginal_candidate(base_weights, min_allocation=MIN_ALLOCATION, interval_range=INTERVAL_RANGE):
+    """
+    Perturbs base_weights by shifting small amounts (5%) between intervals
+    or adjacent time periods, maintaining validity.
+    """
+    candidate = base_weights.copy()
+    active_indices = np.where(candidate > 0.001)[0]
+
+    # Fallback if empty
+    if len(active_indices) == 0:
+        return generate_random_valid_allocation(min_allocation, interval_range)
+
+    # Type A: Weight Shift (Move 5% from one active interval to another)
+    if random.random() < 0.6 and len(active_indices) > 1:
+        idx1, idx2 = np.random.choice(active_indices, 2, replace=False)
+        shift = 0.05
+        # Check bounds
+        if candidate[idx1] - shift >= min_allocation and candidate[idx2] + shift <= 0.50:
+            candidate[idx1] -= shift
+            candidate[idx2] += shift
+
+    # Type B: Time Shift (Move 5% to a neighbor)
+    else:
+        idx = np.random.choice(active_indices)
+        # Check left/right neighbors
+        neighbors = []
+        if idx > 0:
+            neighbors.append(idx - 1)
+        if idx < interval_range - 1:
+            neighbors.append(idx + 1)
+
+        if neighbors:
+            target = np.random.choice(neighbors)
+            shift = 0.05
+
+            # If target is currently 0, we must move at least min_allocation to activate it
+            if candidate[target] < 0.001:
+                shift = min_allocation
+
+            # Check bounds and constraints
+            if candidate[idx] - shift >= min_allocation and candidate[target] + shift <= 0.50:
+                # Check adjacency rules - ensure target doesn't violate adjacency with other active intervals
+                other_active = [i for i in active_indices if i != idx]
+                is_adjacent_violation = False
+                for other_idx in other_active:
+                    if abs(target - other_idx) == 1:
+                        # Allow Nov-Dec(10) and Jan-Feb(0) adjacency exception
+                        if not ((target == 0 and other_idx == 10) or (target == 10 and other_idx == 0)):
+                            is_adjacent_violation = True
+                            break
+
+                if not is_adjacent_violation:
+                    candidate[idx] -= shift
+                    candidate[target] += shift
+
+    # Normalize and Round
+    candidate = np.clip(candidate, 0, 0.50)
+    if candidate.sum() > 0:
+        candidate = candidate / candidate.sum()
+        candidate = np.round(candidate / 0.01) * 0.01  # Maintain 1% increments
+        # Fix rounding errors
+        diff = 1.0 - candidate.sum()
+        if abs(diff) > 0.001:
+            candidate[np.argmax(candidate)] += diff
+
+    return candidate
+
+def calculate_vectorized_roi(weights_batch, index_matrix, premium_rates_array,
+                              coverage_level, subsidy, total_protection):
+    """
+    Vectorized ROI calculation for a batch of weight candidates.
+
+    Args:
+        weights_batch: numpy array of shape (n_candidates, 11) - allocation weights
+        index_matrix: numpy array of shape (n_years, 11) - index values per year/interval
+        premium_rates_array: numpy array of shape (11,) - premium rates per interval
+        coverage_level: float (e.g., 0.80)
+        subsidy: float (e.g., 0.59)
+        total_protection: float - total policy protection amount
+
+    Returns:
+        numpy array of shape (n_candidates,) - cumulative ROI for each candidate
+    """
+    n_candidates = weights_batch.shape[0]
+    n_years = index_matrix.shape[0]
+
+    # Calculate protection per interval for each candidate: (n_candidates, 11)
+    interval_protection = weights_batch * total_protection
+
+    # Calculate premium per interval: (n_candidates, 11)
+    total_premium = interval_protection * premium_rates_array
+    producer_premium = total_premium * (1 - subsidy)
+
+    # Sum producer premium across intervals for each candidate: (n_candidates,)
+    annual_premium = producer_premium.sum(axis=1)
+
+    # Total premium over all years: (n_candidates,)
+    total_premium_all_years = annual_premium * n_years
+
+    # Calculate trigger level
+    trigger = coverage_level * 100
+
+    # Calculate shortfall for each year/interval: (n_years, 11)
+    shortfall_pct = np.maximum(0, (trigger - index_matrix) / trigger)
+
+    # Calculate indemnity: broadcast (n_candidates, 11) * (n_years, 11) -> need to iterate or reshape
+    # For each candidate, sum indemnity across all years and intervals
+    # indemnity[c, y, i] = shortfall_pct[y, i] * interval_protection[c, i]
+
+    # Reshape for broadcasting: (1, n_years, 11) and (n_candidates, 1, 11)
+    shortfall_expanded = shortfall_pct[np.newaxis, :, :]  # (1, n_years, 11)
+    protection_expanded = interval_protection[:, np.newaxis, :]  # (n_candidates, 1, 11)
+
+    # Indemnity: (n_candidates, n_years, 11)
+    indemnity = shortfall_expanded * protection_expanded
+
+    # Sum across years and intervals: (n_candidates,)
+    total_indemnity = indemnity.sum(axis=(1, 2))
+
+    # Calculate ROI
+    roi = np.where(
+        total_premium_all_years > 0,
+        (total_indemnity - total_premium_all_years) / total_premium_all_years,
+        -1.0
+    )
+
+    return roi
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_fast_optimization_core(
+    _session, grid_id, start_year, end_year, plan_code, productivity_factor,
+    acres, intended_use, coverage_level, iterations, search_mode
 ):
     """
-    Monte Carlo optimization for finding best allocation for a single grid.
-    Returns (best_allocation, best_roi, strategies_tested).
+    Core optimization function with caching.
+
+    Args:
+        _session: Snowflake session (excluded from cache key with underscore prefix)
+        grid_id: Grid identifier
+        start_year, end_year: Year range for backtest
+        plan_code: Insurance plan code
+        productivity_factor: Productivity multiplier
+        acres: Number of acres
+        intended_use: Use type (Grazing, Haying)
+        coverage_level: Coverage level (e.g., 0.80)
+        iterations: Number of iterations for global search
+        search_mode: 'global' or 'marginal'
+
+    Returns:
+        Tuple of (best_allocation_dict, best_roi, strategies_tested)
     """
-    import random
-    import numpy as np
+    # Load data
+    county_base_value = load_county_base_value(_session, grid_id)
+    all_indices_df = load_all_indices(_session, grid_id)
+    all_indices_df = all_indices_df[
+        (all_indices_df['YEAR'] >= start_year) &
+        (all_indices_df['YEAR'] <= end_year)
+    ]
 
-    # Load data once
-    county_base_value = load_county_base_value(session, grid_id)
-    all_indices_df = load_all_indices(session, grid_id)
-    all_indices_df = all_indices_df[(all_indices_df['YEAR'] >= start_year) & (all_indices_df['YEAR'] <= end_year)]
-
-    current_rate_year = get_current_rate_year(session)
-    premium_rates = load_premium_rates(session, grid_id, intended_use, [coverage_level], current_rate_year)[coverage_level]
-    subsidy = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
+    current_rate_year = get_current_rate_year(_session)
+    premium_rates = load_premium_rates(_session, grid_id, intended_use, [coverage_level], current_rate_year)[coverage_level]
+    subsidy = load_subsidies(_session, plan_code, [coverage_level])[coverage_level]
 
     dollar_protection = county_base_value * coverage_level * productivity_factor
     total_protection = dollar_protection * acres
 
-    def evaluate_allocation(allocation):
-        """Calculate cumulative ROI for an allocation."""
-        total_indemnity_all_years = 0
-        total_premium_all_years = 0
+    # Build index matrix: (n_years, 11)
+    years = sorted(all_indices_df['YEAR'].unique())
+    n_years = len(years)
+    index_matrix = np.zeros((n_years, INTERVAL_RANGE))
 
-        for year in range(start_year, end_year + 1):
-            year_data = all_indices_df[all_indices_df['YEAR'] == year]
-            if year_data.empty:
-                continue
+    for y_idx, year in enumerate(years):
+        year_data = all_indices_df[all_indices_df['YEAR'] == year]
+        for interval_idx, interval_name in enumerate(INTERVAL_ORDER_11):
+            row = year_data[year_data['INTERVAL_NAME'] == interval_name]
+            if not row.empty:
+                index_matrix[y_idx, interval_idx] = float(row['INDEX_VALUE'].iloc[0])
+            else:
+                index_matrix[y_idx, interval_idx] = 100.0  # Default to no shortfall
 
-            year_indemnity = 0
-            year_premium = 0
+    # Build premium rates array: (11,)
+    premium_rates_array = np.array([
+        premium_rates.get(interval, 0) for interval in INTERVAL_ORDER_11
+    ])
 
-            for interval, pct in allocation.items():
-                if pct == 0:
-                    continue
-
-                index_row = year_data[year_data['INTERVAL_NAME'] == interval]
-                index_value = float(index_row['INDEX_VALUE'].iloc[0]) if not index_row.empty else 100
-
-                premium_rate = premium_rates.get(interval, 0)
-                interval_protection = total_protection * pct
-                total_premium = interval_protection * premium_rate
-                producer_premium = total_premium - (total_premium * subsidy)
-
-                trigger = coverage_level * 100
-                shortfall_pct = max(0, (trigger - index_value) / trigger)
-                indemnity = shortfall_pct * interval_protection
-
-                year_indemnity += indemnity
-                year_premium += producer_premium
-
-            total_indemnity_all_years += year_indemnity
-            total_premium_all_years += year_premium
-
-        if total_premium_all_years > 0:
-            return (total_indemnity_all_years - total_premium_all_years) / total_premium_all_years
-        return -1.0
-
-    # Generate candidates
+    # Generate candidates based on search mode
     candidates = []
 
-    if use_marginal:
-        # Start from naive allocation and generate variations
-        naive = generate_naive_allocation(5)
-        candidates.append(naive)
-        candidates.extend(generate_marginal_variations({k: v * 100 for k, v in naive.items()}))
+    if search_mode == 'marginal':
+        # Start from naive allocation and perturb
+        naive_weights = generate_naive_weights()
+        candidates.append(naive_weights)
 
-        # Also try with different interval counts
-        for n in [3, 4, 5, 6]:
-            naive_n = generate_naive_allocation(n)
-            candidates.extend(generate_marginal_variations({k: v * 100 for k, v in naive_n.items()}))
+        # Generate marginal variations
+        for _ in range(iterations):
+            # Pick a random existing candidate as base
+            base = candidates[random.randint(0, len(candidates) - 1)]
+            new_candidate = generate_marginal_candidate(base.copy())
+            candidates.append(new_candidate)
     else:
-        # Monte Carlo random search
-        for i in range(iterations):
-            num_intervals = random.choice([3, 4, 5, 6])
-            alloc = generate_random_allocation(num_intervals, seed=i)
-            if alloc and is_valid_allocation(alloc):
-                candidates.append(alloc)
+        # Global search - random valid allocations
+        for _ in range(iterations):
+            candidates.append(generate_random_valid_allocation())
 
-    # Deduplicate candidates
-    unique_candidates = []
-    seen = set()
-    for c in candidates:
-        key = tuple(sorted((k, round(v, 2)) for k, v in c.items() if v > 0))
-        if key not in seen:
-            seen.add(key)
-            unique_candidates.append(c)
+    # Convert to batch array: (n_candidates, 11)
+    weights_batch = np.array(candidates)
 
-    # Evaluate all candidates
-    best_allocation = None
-    best_roi = -float('inf')
+    # Vectorized ROI calculation
+    roi_scores = calculate_vectorized_roi(
+        weights_batch, index_matrix, premium_rates_array,
+        coverage_level, subsidy, total_protection
+    )
 
-    for alloc in unique_candidates:
-        roi = evaluate_allocation(alloc)
-        if roi > best_roi:
-            best_roi = roi
-            best_allocation = alloc
+    # Find best
+    best_idx = np.argmax(roi_scores)
+    best_weights = weights_batch[best_idx]
+    best_roi = roi_scores[best_idx]
 
-    return best_allocation, best_roi, len(unique_candidates)
+    # Convert weights array to dictionary
+    best_allocation = {}
+    for idx, interval in enumerate(INTERVAL_ORDER_11):
+        if best_weights[idx] > 0.001:
+            best_allocation[interval] = round(best_weights[idx], 2)
+
+    return best_allocation, float(best_roi), len(candidates)
 
 # =============================================================================
 # === ACRE OPTIMIZATION FUNCTIONS (Two-Stage Optimization) ===
@@ -1776,37 +1885,37 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
 
     use_marginal_search = False
     search_iterations = 3000  # Default to Standard
+    search_mode = 'global'
 
     if use_optimization:
-        col1, col2 = st.columns(2)
+        use_marginal_search = st.checkbox(
+            "Use Marginal Search (Perturb Naive Allocation)",
+            value=False,
+            help="Start from naive allocation and perturb by shifting 5% between intervals. Best for fine-tuning.",
+            key="tab5_use_marginal"
+        )
 
-        with col1:
-            use_marginal_search = st.checkbox(
-                "Use Marginal Search",
-                value=False,
-                help="Start from naive allocation and make small adjustments. Best when you have a good starting point.",
-                key="tab5_use_marginal"
-            )
-
-        if not use_marginal_search:
-            with col2:
-                iteration_map = {
-                    'Fast': 500,
-                    'Standard': 3000,
-                    'Thorough': 7000,
-                    'Maximum': 15000
-                }
-                search_depth_key = st.select_slider(
-                    "Search Depth",
-                    options=list(iteration_map.keys()),
-                    value='Standard',
-                    help="More iterations = better results but slower",
-                    key="tab5_search_depth"
-                )
-                search_iterations = iteration_map[search_depth_key]
-                st.caption(f"{search_iterations:,} iterations")
+        if use_marginal_search:
+            search_mode = 'marginal'
+            search_iterations = 1000  # Marginal search uses fewer iterations but more targeted
+            st.info("Marginal search perturbs a naive equal distribution by shifting 5% between intervals or to neighbors.")
         else:
-            st.info("Marginal search starts from a naive equal distribution and tests small adjustments (±5-10% per interval)")
+            search_mode = 'global'
+            iteration_map = {
+                'Fast': 500,
+                'Standard': 3000,
+                'Thorough': 7000,
+                'Maximum': 15000
+            }
+            search_depth_key = st.select_slider(
+                "Search Depth",
+                options=list(iteration_map.keys()),
+                value='Standard',
+                help="More iterations = better results but slower",
+                key="tab5_search_depth"
+            )
+            search_iterations = iteration_map[search_depth_key]
+            st.caption(f"{search_iterations:,} iterations (Global Search)")
 
     st.divider()
 
@@ -1828,20 +1937,21 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                 for idx, gid in enumerate(selected_grids):
                     opt_progress.progress(
                         (idx + 1) / len(selected_grids),
-                        text=f"Optimizing {gid} ({idx + 1}/{len(selected_grids)})..."
+                        text=f"Optimizing {gid} ({idx + 1}/{len(selected_grids)}) - {search_mode} search..."
                     )
                     try:
-                        best_alloc, best_roi, tested = run_portfolio_optimization(
+                        # Use cached run_fast_optimization_core with iterations and search_mode
+                        best_alloc, best_roi, tested = run_fast_optimization_core(
                             session, gid, start_year, end_year, plan_code,
                             productivity_factor, grid_acres[gid], intended_use,
-                            coverage_level, iterations=search_iterations,
-                            use_marginal=use_marginal_search
+                            coverage_level, search_iterations, search_mode
                         )
                         if best_alloc:
                             optimized_allocations[gid] = best_alloc
                             optimization_stats[gid] = {
                                 'roi': best_roi,
-                                'tested': tested
+                                'tested': tested,
+                                'mode': search_mode
                             }
                     except Exception as e:
                         st.warning(f"Optimization failed for {gid}: {str(e)}")
@@ -1852,6 +1962,8 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                 # Show optimization results
                 if optimized_allocations:
                     with st.expander("Optimization Results", expanded=True):
+                        mode_label = "Marginal" if search_mode == 'marginal' else "Global"
+                        st.caption(f"Search Mode: {mode_label} | Iterations: {search_iterations:,}")
                         for gid in selected_grids:
                             if gid in optimized_allocations:
                                 alloc = optimized_allocations[gid]
