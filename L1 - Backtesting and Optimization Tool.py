@@ -1839,7 +1839,8 @@ def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=No
 
 def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_acres, grid_list):
     """
-    Create a styled table showing changes between Champion and Challenger allocations.
+    Create a styled table showing changes between Champion and Challenger allocations,
+    including acreage changes merged into the same table.
 
     Args:
         champ_alloc: Champion allocations dict {grid_id: {interval: weight, ...}}
@@ -1849,19 +1850,20 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
         grid_list: List of grid IDs
 
     Returns:
-        Tuple of (allocation_change_styled, acreage_change_styled)
+        Styled pandas DataFrame with allocation and acreage changes
     """
-    # === ALLOCATION CHANGES TABLE ===
-    alloc_rows = []
+    rows = []
     total_changes = {interval: 0 for interval in INTERVAL_ORDER_11}
+    total_champ_acres = 0
+    total_chall_acres = 0
 
     for gid in grid_list:
         c_alloc = champ_alloc.get(gid, {})
         ch_alloc = chall_alloc.get(gid, {})
         row = {'Grid': gid}
 
+        # Allocation changes for each interval
         for interval in INTERVAL_ORDER_11:
-            # Get values (handle both decimal and percentage formats)
             c_val = c_alloc.get(interval, 0)
             ch_val = ch_alloc.get(interval, 0)
 
@@ -1877,23 +1879,53 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
             else:
                 row[interval] = f"{change:+.0f}%"
 
-        alloc_rows.append(row)
+        # Acreage columns
+        c_acres = champ_acres.get(gid, 0)
+        ch_acres = chall_acres.get(gid, 0)
+        acre_change = ch_acres - c_acres
+        acre_change_pct = (acre_change / c_acres * 100) if c_acres > 0 else 0
 
-    # Add AVERAGE SHIFT row
+        total_champ_acres += c_acres
+        total_chall_acres += ch_acres
+
+        row['Champ Acres'] = f"{c_acres:,.0f}"
+        row['Chall Acres'] = f"{ch_acres:,.0f}"
+        row['Acre Δ'] = f"{acre_change:+,.0f}"
+        row['Acre Δ %'] = f"{acre_change_pct:+.1f}%"
+
+        rows.append(row)
+
+    # Add AVERAGE SHIFT row (totals for acres, not averages)
     avg_row = {'Grid': 'AVG SHIFT'}
     grid_count = len(grid_list)
     for interval in INTERVAL_ORDER_11:
         avg_change = total_changes[interval] / grid_count if grid_count > 0 else 0
         avg_row[interval] = f"{avg_change:+.0f}%" if abs(avg_change) >= 0.5 else "--"
-    alloc_rows.append(avg_row)
 
-    alloc_df = pd.DataFrame(alloc_rows)
+    # Acre totals for the summary row
+    total_acre_change = total_chall_acres - total_champ_acres
+    total_acre_change_pct = (total_acre_change / total_champ_acres * 100) if total_champ_acres > 0 else 0
+    avg_row['Champ Acres'] = f"{total_champ_acres:,.0f}"
+    avg_row['Chall Acres'] = f"{total_chall_acres:,.0f}"
+    avg_row['Acre Δ'] = f"{total_acre_change:+,.0f}"
+    avg_row['Acre Δ %'] = f"{total_acre_change_pct:+.1f}%"
+    rows.append(avg_row)
+
+    df = pd.DataFrame(rows)
 
     # Style function for red/green gradient on changes
     def highlight_change_cell(val):
-        if isinstance(val, str) and val.endswith('%') and val != "--":
+        if isinstance(val, str) and val != "--":
             try:
-                change = float(val.replace('%', '').replace('+', ''))
+                # Handle percentage values
+                if val.endswith('%'):
+                    change = float(val.replace('%', '').replace('+', ''))
+                # Handle acre values with commas
+                elif ',' in val or val.startswith('+') or val.startswith('-'):
+                    change = float(val.replace(',', '').replace('+', ''))
+                else:
+                    return ''
+
                 if change >= 40:
                     return 'background-color: #2e7d32; color: white'  # Dark green
                 elif change >= 25:
@@ -1910,65 +1942,11 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
                 pass
         return ''
 
-    alloc_styled = alloc_df.style.applymap(highlight_change_cell, subset=INTERVAL_ORDER_11)
+    # Apply styling to interval columns and acre change columns
+    style_cols = list(INTERVAL_ORDER_11) + ['Acre Δ', 'Acre Δ %']
+    styled = df.style.applymap(highlight_change_cell, subset=[c for c in style_cols if c in df.columns])
 
-    # === ACREAGE CHANGES TABLE ===
-    acre_rows = []
-    total_champ_acres = 0
-    total_chall_acres = 0
-
-    for gid in grid_list:
-        c_acres = champ_acres.get(gid, 0)
-        ch_acres = chall_acres.get(gid, 0)
-        change = ch_acres - c_acres
-        change_pct = (change / c_acres * 100) if c_acres > 0 else 0
-
-        total_champ_acres += c_acres
-        total_chall_acres += ch_acres
-
-        acre_rows.append({
-            'Grid': gid,
-            'Champion': f"{c_acres:,.0f}",
-            'Challenger': f"{ch_acres:,.0f}",
-            'Change': f"{change:+,.0f}",
-            'Change %': f"{change_pct:+.1f}%"
-        })
-
-    # Add total row
-    total_change = total_chall_acres - total_champ_acres
-    total_change_pct = (total_change / total_champ_acres * 100) if total_champ_acres > 0 else 0
-    acre_rows.append({
-        'Grid': 'TOTAL',
-        'Champion': f"{total_champ_acres:,.0f}",
-        'Challenger': f"{total_chall_acres:,.0f}",
-        'Change': f"{total_change:+,.0f}",
-        'Change %': f"{total_change_pct:+.1f}%"
-    })
-
-    acre_df = pd.DataFrame(acre_rows)
-
-    # Style function for acreage changes
-    def highlight_acre_change(val):
-        if isinstance(val, str):
-            try:
-                if val.endswith('%'):
-                    num = float(val.replace('%', '').replace('+', ''))
-                elif ',' in val or val.startswith('+') or val.startswith('-'):
-                    num = float(val.replace(',', '').replace('+', ''))
-                else:
-                    return ''
-
-                if num > 0:
-                    return 'background-color: #81c784'  # Light green
-                elif num < 0:
-                    return 'background-color: #ef9a9a'  # Light red
-            except:
-                pass
-        return ''
-
-    acre_styled = acre_df.style.applymap(highlight_acre_change, subset=['Change', 'Change %'])
-
-    return alloc_styled, acre_styled
+    return styled
 
 
 def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code):
@@ -1980,9 +1958,17 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     # CALLBACK FUNCTIONS (Must be defined before widgets that use them)
     # ==========================================================================
     def load_king_ranch_callback():
-        """Callback to load King Ranch preset - runs BEFORE page reloads."""
+        """Simple callback that just sets a flag - actual loading happens in main function."""
+        st.session_state.ps_kr_load_requested = True
+
+    st.subheader("Portfolio Strategy: Champion vs. Challenger")
+
+    # ==========================================================================
+    # DEFERRED KING RANCH LOADING (executed where session is available)
+    # ==========================================================================
+    if st.session_state.get('ps_kr_load_requested', False):
         try:
-            all_grids_for_callback = load_distinct_grids(session)
+            all_grids_for_loading = load_distinct_grids(session)
 
             target_grid_mapping = {}
             for county, grid_ids in KING_RANCH_PRESET['counties'].items():
@@ -1992,15 +1978,15 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
             preset_grid_ids = []
             for numeric_id in KING_RANCH_PRESET['grids']:
                 target_str = target_grid_mapping.get(numeric_id, "")
-                if target_str in all_grids_for_callback:
+                if target_str in all_grids_for_loading:
                     preset_grid_ids.append(target_str)
                 else:
-                    for grid_option in all_grids_for_callback:
+                    for grid_option in all_grids_for_loading:
                         if extract_numeric_grid_id(grid_option) == numeric_id:
                             preset_grid_ids.append(grid_option)
                             break
 
-            # Set session state values - this happens BEFORE the page reloads
+            # Set session state values
             st.session_state.ps_grids = preset_grid_ids
             st.session_state.productivity_factor = 1.35
             st.session_state.ps_coverage = 0.75  # Set to 75% coverage
@@ -2017,20 +2003,13 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                 alloc_decimal = {interval: float(alloc.get(interval, 0.0)) / 100.0 for interval in INTERVAL_ORDER_11}
                 st.session_state[f"ps_champ_{gid}_preset_allocation"] = alloc_decimal
 
-            st.session_state.ps_kr_loaded = True
+            st.success("King Ranch preset loaded! (8 grids, 135% productivity, 75% coverage)")
 
         except Exception as e:
-            st.session_state.ps_kr_error = str(e)
+            st.error(f"Error loading King Ranch: {e}")
 
-    st.subheader("Portfolio Strategy: Champion vs. Challenger")
-
-    # Show success/error messages from callback
-    if st.session_state.get('ps_kr_loaded', False):
-        st.success("King Ranch preset loaded!")
-        st.session_state.ps_kr_loaded = False  # Reset flag
-    if st.session_state.get('ps_kr_error'):
-        st.error(f"Error loading King Ranch: {st.session_state.ps_kr_error}")
-        st.session_state.ps_kr_error = None  # Reset error
+        # Reset the flag
+        st.session_state.ps_kr_load_requested = False
 
     # ==========================================================================
     # TOP SECTION: GLOBAL SETTINGS
@@ -2489,43 +2468,32 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         else:
             st.info("**TIE!** Both strategies performed equally.")
 
-        # === ALLOCATION COMPARISON: 3-COLUMN LAYOUT ===
+        # === ALLOCATION COMPARISON: VERTICAL STACK ===
         st.markdown("#### Interval Allocation Comparison")
         st.caption("Green = allocation intensity | Red/Green changes = decrease/increase")
 
-        col1, col2, col3 = st.columns(3)
+        # Champion Table (full width)
+        st.markdown("**Champion (Baseline)**")
+        champ_styled = create_optimized_allocation_table(
+            champ['allocations'], selected_grids, grid_acres=champ['acres']
+        )
+        st.dataframe(champ_styled, use_container_width=True, hide_index=True)
 
-        with col1:
-            st.markdown("**Champion (Baseline)**")
-            champ_styled = create_optimized_allocation_table(
-                champ['allocations'], selected_grids, grid_acres=champ['acres']
-            )
-            st.dataframe(champ_styled, use_container_width=True, hide_index=True)
+        # Challenger Table (full width)
+        st.markdown("**Challenger (Optimized)**")
+        chall_styled = create_optimized_allocation_table(
+            chall['allocations'], selected_grids, grid_acres=chall['acres']
+        )
+        st.dataframe(chall_styled, use_container_width=True, hide_index=True)
 
-        with col2:
-            st.markdown("**Challenger (Optimized)**")
-            chall_styled = create_optimized_allocation_table(
-                chall['allocations'], selected_grids, grid_acres=chall['acres']
-            )
-            st.dataframe(chall_styled, use_container_width=True, hide_index=True)
-
-        with col3:
-            st.markdown("**Change Analysis**")
-            alloc_change_styled, acre_change_styled = create_change_analysis_table(
-                champ['allocations'], chall['allocations'],
-                champ['acres'], chall['acres'],
-                selected_grids
-            )
-            st.dataframe(alloc_change_styled, use_container_width=True, hide_index=True)
-
-        # === ACREAGE CHANGES TABLE ===
-        st.markdown("#### Acreage Distribution Changes")
-        _, acre_change_table = create_change_analysis_table(
+        # Change Analysis Table (full width, includes acreage changes)
+        st.markdown("**Change Analysis** (includes acreage changes)")
+        change_styled = create_change_analysis_table(
             champ['allocations'], chall['allocations'],
             champ['acres'], chall['acres'],
             selected_grids
         )
-        st.dataframe(acre_change_table, use_container_width=True, hide_index=True)
+        st.dataframe(change_styled, use_container_width=True, hide_index=True)
 
         # Yearly Comparison Chart
         st.markdown("#### Yearly ROI Comparison")
