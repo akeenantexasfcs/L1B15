@@ -1841,6 +1841,13 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                 numeric_id = extract_numeric_grid_id(gid)
                 st.session_state[f"ps_champ_acres_{gid}"] = KING_RANCH_PRESET['acres'].get(numeric_id, total_insured_acres)
 
+            # Set allocations via preset keys (convert percentages to decimals)
+            for gid in preset_grid_ids:
+                numeric_id = extract_numeric_grid_id(gid)
+                alloc = KING_RANCH_PRESET['allocations'][numeric_id]
+                alloc_decimal = {interval: float(alloc.get(interval, 0.0)) / 100.0 for interval in INTERVAL_ORDER_11}
+                st.session_state[f"ps_champ_{gid}_preset_allocation"] = alloc_decimal
+
             st.session_state.ps_kr_loaded = True
 
         except Exception as e:
@@ -2565,7 +2572,7 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                 st.session_state.tab5_coverage = 0.75  # 75% coverage
 
                 st.success("King Ranch loaded! (8 grids, 135% productivity, 75% coverage)")
-                st.rerun()
+                # Removed st.rerun() - rely on Streamlit's natural reactivity
 
             except Exception as e:
                 st.error(f"Error loading King Ranch: {e}")
@@ -3256,12 +3263,12 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                 
                 if preset_grid_ids:
                     st.success("✅ King Ranch loaded! (8 grids, 135% productivity, 75% coverage)")
-                
-                st.rerun()
-                
+
+                # Removed st.rerun() - rely on Streamlit's natural reactivity
+
             except Exception as e:
                 st.error(f"Error loading King Ranch: {e}")
-    
+
     with col2:
         st.caption("Auto-select King Ranch grids")
     
