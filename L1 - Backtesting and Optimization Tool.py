@@ -1883,33 +1883,29 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
         c_acres = champ_acres.get(gid, 0)
         ch_acres = chall_acres.get(gid, 0)
         acre_change = ch_acres - c_acres
-        acre_change_pct = (acre_change / c_acres * 100) if c_acres > 0 else 0
 
         total_champ_acres += c_acres
         total_chall_acres += ch_acres
 
         row['Champ Acres'] = f"{c_acres:,.0f}"
         row['Chall Acres'] = f"{ch_acres:,.0f}"
-        row['Acre Δ'] = f"{acre_change:+,.0f}"
-        row['Acre Δ %'] = f"{acre_change_pct:+.1f}%"
+        row['Acre Δ'] = f"{acre_change:+,.0f}" if acre_change != 0 else "--"
 
         rows.append(row)
 
-    # Add AVERAGE SHIFT row (totals for acres, not averages)
-    avg_row = {'Grid': 'AVG SHIFT'}
+    # Add PORTFOLIO TOTALS row (totals for acres)
+    totals_row = {'Grid': 'PORTFOLIO TOTALS'}
     grid_count = len(grid_list)
     for interval in INTERVAL_ORDER_11:
         avg_change = total_changes[interval] / grid_count if grid_count > 0 else 0
-        avg_row[interval] = f"{avg_change:+.0f}%" if abs(avg_change) >= 0.5 else "--"
+        totals_row[interval] = f"{avg_change:+.0f}%" if abs(avg_change) >= 0.5 else "--"
 
     # Acre totals for the summary row
     total_acre_change = total_chall_acres - total_champ_acres
-    total_acre_change_pct = (total_acre_change / total_champ_acres * 100) if total_champ_acres > 0 else 0
-    avg_row['Champ Acres'] = f"{total_champ_acres:,.0f}"
-    avg_row['Chall Acres'] = f"{total_chall_acres:,.0f}"
-    avg_row['Acre Δ'] = f"{total_acre_change:+,.0f}"
-    avg_row['Acre Δ %'] = f"{total_acre_change_pct:+.1f}%"
-    rows.append(avg_row)
+    totals_row['Champ Acres'] = f"{total_champ_acres:,.0f}"
+    totals_row['Chall Acres'] = f"{total_chall_acres:,.0f}"
+    totals_row['Acre Δ'] = f"{total_acre_change:+,.0f}" if total_acre_change != 0 else "--"
+    rows.append(totals_row)
 
     df = pd.DataFrame(rows)
 
@@ -1942,11 +1938,74 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
                 pass
         return ''
 
-    # Apply styling to interval columns and acre change columns
-    style_cols = list(INTERVAL_ORDER_11) + ['Acre Δ', 'Acre Δ %']
+    # Apply styling to interval columns and acre change column
+    style_cols = list(INTERVAL_ORDER_11) + ['Acre Δ']
     styled = df.style.applymap(highlight_change_cell, subset=[c for c in style_cols if c in df.columns])
 
     return styled
+
+
+def create_performance_comparison_table(champ_metrics, chall_metrics):
+    """
+    Create a performance comparison table with proper formatting.
+
+    Args:
+        champ_metrics: Dict with champion performance metrics
+        chall_metrics: Dict with challenger performance metrics
+
+    Returns:
+        pandas DataFrame for display with st.table
+    """
+    # Extract metrics
+    champ_roi = champ_metrics.get('cumulative_roi', 0)
+    chall_roi = chall_metrics.get('cumulative_roi', 0)
+    roi_change = chall_roi - champ_roi
+
+    champ_risk_adj = champ_metrics.get('risk_adj_return', 0)
+    chall_risk_adj = chall_metrics.get('risk_adj_return', 0)
+    risk_adj_change = chall_risk_adj - champ_risk_adj
+
+    champ_premium = champ_metrics.get('avg_annual_premium', 0)
+    chall_premium = chall_metrics.get('avg_annual_premium', 0)
+    premium_change = chall_premium - champ_premium
+
+    champ_win = champ_metrics.get('profitable_pct', 0)
+    chall_win = chall_metrics.get('profitable_pct', 0)
+    win_change = chall_win - champ_win
+
+    # Format with + prefix for positive changes
+    def format_change_pct(val):
+        return f"+{val:.1%}" if val > 0 else f"{val:.1%}"
+
+    def format_change_float(val):
+        return f"+{val:.2f}" if val > 0 else f"{val:.2f}"
+
+    def format_change_currency(val):
+        return f"+${val:,.0f}" if val > 0 else f"-${abs(val):,.0f}" if val < 0 else "$0"
+
+    comparison_data = {
+        'Metric': ['Cumulative ROI', 'Risk-Adjusted Return', 'Est. Annual Premium', 'Win Rate'],
+        'Champion': [
+            f"{champ_roi:.1%}",
+            f"{champ_risk_adj:.2f}",
+            f"${champ_premium:,.0f}",
+            f"{champ_win:.0%}"
+        ],
+        'Challenger': [
+            f"{chall_roi:.1%}",
+            f"{chall_risk_adj:.2f}",
+            f"${chall_premium:,.0f}",
+            f"{chall_win:.0%}"
+        ],
+        'Change': [
+            format_change_pct(roi_change),
+            format_change_float(risk_adj_change),
+            format_change_currency(premium_change),
+            format_change_pct(win_change)
+        ]
+    }
+
+    return pd.DataFrame(comparison_data)
 
 
 def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code):
@@ -2086,8 +2145,14 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     st.markdown("### The Champion (Baseline)")
     st.caption("Define your manual baseline strategy. This is what the AI will try to beat.")
 
+    # Initialize expander state management (prevents auto-opening on rerun)
+    if 'ps_acres_expander_opened' not in st.session_state:
+        st.session_state.ps_acres_expander_opened = True  # Start open first time only
+    if 'ps_alloc_expander_opened' not in st.session_state:
+        st.session_state.ps_alloc_expander_opened = False  # Start collapsed
+
     # Champion Acreage Configuration
-    with st.expander("Champion Acreage per Grid", expanded=True):
+    with st.expander("Champion Acreage per Grid", expanded=st.session_state.ps_acres_expander_opened):
         champion_acres = {}
         cols = st.columns(min(4, len(selected_grids)))
         for idx, gid in enumerate(selected_grids):
@@ -2106,7 +2171,7 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     champion_allocations = {}
     champion_all_valid = True
 
-    with st.expander("Champion Interval Allocations", expanded=True):
+    with st.expander("Champion Interval Allocations", expanded=st.session_state.ps_alloc_expander_opened):
         for gid in selected_grids:
             st.markdown(f"**{gid}**")
             alloc_dict, is_valid = render_allocation_inputs(f"ps_champ_{gid}")
@@ -2428,33 +2493,10 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         champ_metrics = champ.get('metrics', {})
         chall_metrics = chall.get('metrics', {})
 
-        # Side-by-Side Metrics Table
+        # Performance Comparison Table (using st.table for clean display)
         st.markdown("#### Performance Comparison")
-
-        comparison_data = {
-            'Metric': ['Cumulative ROI', 'Risk-Adjusted Return', 'Estimated Avg. Annual Premium', 'Win Rate'],
-            'Champion': [
-                f"{champ_metrics.get('cumulative_roi', 0):.1%}",
-                f"{champ_metrics.get('risk_adj_return', 0):.2f}",
-                f"${champ_metrics.get('avg_annual_premium', 0):,.0f}",
-                f"{champ_metrics.get('profitable_pct', 0):.0%}"
-            ],
-            'Challenger': [
-                f"{chall_metrics.get('cumulative_roi', 0):.1%}",
-                f"{chall_metrics.get('risk_adj_return', 0):.2f}",
-                f"${chall_metrics.get('avg_annual_premium', 0):,.0f}",
-                f"{chall_metrics.get('profitable_pct', 0):.0%}"
-            ],
-            'Difference': [
-                f"{(chall_metrics.get('cumulative_roi', 0) - champ_metrics.get('cumulative_roi', 0)):.1%}",
-                f"{(chall_metrics.get('risk_adj_return', 0) - champ_metrics.get('risk_adj_return', 0)):.2f}",
-                f"${(chall_metrics.get('avg_annual_premium', 0) - champ_metrics.get('avg_annual_premium', 0)):,.0f}",
-                f"{(chall_metrics.get('profitable_pct', 0) - champ_metrics.get('profitable_pct', 0)):.0%}"
-            ]
-        }
-
-        comparison_df = pd.DataFrame(comparison_data)
-        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+        comparison_df = create_performance_comparison_table(champ_metrics, chall_metrics)
+        st.table(comparison_df.set_index('Metric'))
 
         # Winner Banner
         chall_roi = chall_metrics.get('cumulative_roi', 0)
