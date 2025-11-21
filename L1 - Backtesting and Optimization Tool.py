@@ -2462,10 +2462,85 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     st.divider()
 
     # ==========================================================================
+    # HISTORICAL GRID CORRELATIONS (Optional Analysis)
+    # ==========================================================================
+    with st.expander("📉 Historical Grid Correlations", expanded=False):
+        if len(selected_grids) < 2:
+            st.info("Select at least two grids to view correlations.")
+        else:
+            try:
+                # Collect index data for all selected grids
+                all_index_data = []
+                for gid in selected_grids:
+                    grid_indices = load_all_indices(session, gid)
+
+                    # Apply scenario filter to match user's selected scenario
+                    if selected_scenario == 'Custom Range':
+                        filtered_indices = filter_indices_by_scenario(
+                            grid_indices, selected_scenario, start_year, end_year
+                        )
+                    else:
+                        filtered_indices = filter_indices_by_scenario(
+                            grid_indices, selected_scenario
+                        )
+
+                    # Add Grid ID and create time period identifier
+                    filtered_indices = filtered_indices.copy()
+                    filtered_indices['Grid ID'] = gid
+                    filtered_indices['Period'] = filtered_indices['YEAR'].astype(str) + '-' + filtered_indices['INTERVAL_NAME']
+                    all_index_data.append(filtered_indices[['Period', 'Grid ID', 'INDEX_VALUE']])
+
+                if all_index_data:
+                    # Combine all grid data
+                    combined_df = pd.concat(all_index_data, ignore_index=True)
+
+                    # Pivot so rows are time periods and columns are Grid IDs
+                    pivot_df = combined_df.pivot_table(
+                        values='INDEX_VALUE',
+                        index='Period',
+                        columns='Grid ID',
+                        aggfunc='mean'
+                    )
+
+                    # Calculate correlation matrix
+                    corr_matrix = pivot_df.corr()
+
+                    # Generate heatmap
+                    import matplotlib.pyplot as plt
+                    import seaborn as sns
+
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    sns.heatmap(
+                        corr_matrix,
+                        annot=True,
+                        cmap='RdYlGn',
+                        fmt=".2f",
+                        vmin=-1,
+                        vmax=1,
+                        center=0,
+                        ax=ax,
+                        square=True,
+                        linewidths=0.5
+                    )
+                    ax.set_title(f"Grid Index Correlations ({selected_scenario})", fontsize=12)
+                    plt.tight_layout()
+
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+                    st.caption("Correlations close to 1.0 indicate grids that perform similarly. "
+                              "Lower correlations suggest diversification benefits.")
+                else:
+                    st.warning("No index data available for selected grids.")
+
+            except Exception as e:
+                st.error(f"Error generating correlation heatmap: {e}")
+
+    # ==========================================================================
     # MIDDLE SECTION: THE CHAMPION (BASELINE)
     # ==========================================================================
     st.markdown("### The Champion (Baseline)")
-    st.caption("Define your manual baseline strategy. This is what the AI will try to beat.")
+    st.caption("Define your manual baseline strategy. This is what the optimizer will try to beat.")
 
     # Initialize expander state management (prevents auto-opening on rerun)
     if 'ps_acres_expander_opened' not in st.session_state:
@@ -2536,7 +2611,7 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     # ==========================================================================
     # BOTTOM SECTION: THE CHALLENGER (OPTIMIZER)
     # ==========================================================================
-    st.markdown("### The Challenger (AI Optimizer)")
+    st.markdown("### The Challenger (Optimizer)")
     st.caption("Build on your Champion strategy by adding incremental grids.")
 
     # --------------------------------------------------------------------------
