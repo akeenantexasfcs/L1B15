@@ -1555,6 +1555,740 @@ def render_tab2(session, grid_id, intended_use, productivity_factor, total_insur
         st.info("Select parameters and click 'Run Calculation'")
 
 # =============================================================================
+# === 5. PORTFOLIO STRATEGY TAB (Champion vs Challenger) ===
+# =============================================================================
+
+def run_portfolio_backtest(
+    session, selected_grids, grid_allocations, grid_acres,
+    start_year, end_year, coverage_level, productivity_factor,
+    intended_use, plan_code, scenario='All Years (except Current Year)'
+):
+    """
+    Run a historical backtest for a portfolio of grids.
+    Returns: (portfolio_results_df, grid_results_dict, metrics_dict)
+    """
+    grid_results = {}
+    portfolio_yearly = {}
+
+    for gid in selected_grids:
+        try:
+            subsidy_percent = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
+            county_base_value = load_county_base_value(session, gid)
+            current_rate_year = get_current_rate_year(session)
+            premium_rates_df = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
+
+            dollar_protection = county_base_value * coverage_level * productivity_factor
+            total_protection = dollar_protection * grid_acres.get(gid, 0)
+
+            all_indices_df = load_all_indices(session, gid)
+
+            # Apply scenario filter
+            filtered_df = filter_indices_by_scenario(all_indices_df, scenario, start_year, end_year)
+
+            allocation = grid_allocations.get(gid, {})
+            year_results = []
+
+            for year in sorted(filtered_df['YEAR'].unique()):
+                actuals_df = filtered_df[filtered_df['YEAR'] == year].set_index('INTERVAL_NAME')
+                if actuals_df.empty:
+                    continue
+
+                year_indemnity = 0
+                year_premium = 0
+
+                for interval, pct in allocation.items():
+                    if pct == 0:
+                        continue
+
+                    index_row = actuals_df.loc[interval] if interval in actuals_df.index else None
+                    index_value = float(index_row['INDEX_VALUE']) if index_row is not None else 100
+
+                    premium_rate = premium_rates_df.get(interval, 0)
+                    interval_protection = total_protection * pct
+                    total_premium = interval_protection * premium_rate
+                    producer_premium = total_premium - (total_premium * subsidy_percent)
+
+                    trigger = coverage_level * 100
+                    shortfall_pct = max(0, (trigger - index_value) / trigger)
+                    indemnity = shortfall_pct * interval_protection
+
+                    year_indemnity += indemnity
+                    year_premium += producer_premium
+
+                year_results.append({
+                    'year': year,
+                    'indemnity': year_indemnity,
+                    'premium': year_premium,
+                    'net': year_indemnity - year_premium,
+                    'roi': (year_indemnity - year_premium) / year_premium if year_premium > 0 else 0
+                })
+
+                # Aggregate to portfolio level
+                if year not in portfolio_yearly:
+                    portfolio_yearly[year] = {'indemnity': 0, 'premium': 0}
+                portfolio_yearly[year]['indemnity'] += year_indemnity
+                portfolio_yearly[year]['premium'] += year_premium
+
+            grid_results[gid] = {
+                'year_results': pd.DataFrame(year_results),
+                'allocation': allocation,
+                'acres': grid_acres.get(gid, 0)
+            }
+
+        except Exception as e:
+            grid_results[gid] = {'error': str(e)}
+
+    # Build portfolio results
+    portfolio_rows = []
+    for year, data in sorted(portfolio_yearly.items()):
+        net = data['indemnity'] - data['premium']
+        roi = net / data['premium'] if data['premium'] > 0 else 0
+        portfolio_rows.append({
+            'Year': year,
+            'Total Indemnity': data['indemnity'],
+            'Producer Premium': data['premium'],
+            'Net Return': net,
+            'ROI': roi
+        })
+
+    portfolio_df = pd.DataFrame(portfolio_rows)
+
+    # Calculate aggregate metrics
+    if len(portfolio_df) > 0:
+        total_indemnity = portfolio_df['Total Indemnity'].sum()
+        total_premium = portfolio_df['Producer Premium'].sum()
+        cumulative_roi = (total_indemnity - total_premium) / total_premium if total_premium > 0 else 0
+        avg_roi = portfolio_df['ROI'].mean()
+        std_roi = portfolio_df['ROI'].std()
+        risk_adj_return = cumulative_roi / std_roi if std_roi > 0 else 0
+        profitable_years = (portfolio_df['Net Return'] > 0).sum()
+        profitable_pct = profitable_years / len(portfolio_df) if len(portfolio_df) > 0 else 0
+
+        metrics = {
+            'cumulative_roi': cumulative_roi,
+            'avg_roi': avg_roi,
+            'std_roi': std_roi,
+            'risk_adj_return': risk_adj_return,
+            'total_indemnity': total_indemnity,
+            'total_premium': total_premium,
+            'total_profit': total_indemnity - total_premium,
+            'profitable_pct': profitable_pct,
+            'years_tested': len(portfolio_df)
+        }
+    else:
+        metrics = {}
+
+    return portfolio_df, grid_results, metrics
+
+
+def generate_base_data_for_mvo(session, selected_grids, grid_results_with_allocations,
+                                start_year, end_year, coverage_level, productivity_factor,
+                                intended_use, plan_code):
+    """
+    Generate the base_data_df required by optimize_grid_allocation.
+    This creates historical ROI data for each grid using the optimized allocations.
+    Returns: DataFrame with columns ['year', 'grid', 'roi']
+    """
+    rows = []
+
+    for gid in selected_grids:
+        if gid not in grid_results_with_allocations:
+            continue
+
+        allocation = grid_results_with_allocations[gid].get('allocation', {})
+        if not allocation:
+            continue
+
+        try:
+            subsidy_percent = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
+            county_base_value = load_county_base_value(session, gid)
+            current_rate_year = get_current_rate_year(session)
+            premium_rates = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
+
+            dollar_protection = county_base_value * coverage_level * productivity_factor
+            # Use 1 acre for normalized ROI calculation
+            total_protection = dollar_protection * 1
+
+            all_indices_df = load_all_indices(session, gid)
+            all_indices_df = all_indices_df[
+                (all_indices_df['YEAR'] >= start_year) &
+                (all_indices_df['YEAR'] <= end_year)
+            ]
+
+            for year in range(start_year, end_year + 1):
+                year_data = all_indices_df[all_indices_df['YEAR'] == year]
+                if year_data.empty:
+                    continue
+
+                year_indemnity = 0
+                year_premium = 0
+
+                for interval, pct in allocation.items():
+                    if pct == 0:
+                        continue
+
+                    index_row = year_data[year_data['INTERVAL_NAME'] == interval]
+                    index_value = float(index_row['INDEX_VALUE'].iloc[0]) if not index_row.empty else 100
+
+                    premium_rate = premium_rates.get(interval, 0)
+                    interval_protection = total_protection * pct
+                    total_prem = interval_protection * premium_rate
+                    producer_premium = total_prem - (total_prem * subsidy_percent)
+
+                    trigger = coverage_level * 100
+                    shortfall_pct = max(0, (trigger - index_value) / trigger)
+                    indemnity = shortfall_pct * interval_protection
+
+                    year_indemnity += indemnity
+                    year_premium += producer_premium
+
+                roi = (year_indemnity - year_premium) / year_premium if year_premium > 0 else 0
+                rows.append({'year': year, 'grid': gid, 'roi': roi})
+
+        except Exception as e:
+            continue
+
+    return pd.DataFrame(rows)
+
+
+def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code):
+    """
+    Unified Portfolio Strategy tab implementing Champion vs Challenger workflow.
+    """
+    st.subheader("Portfolio Strategy: Champion vs. Challenger")
+
+    # ==========================================================================
+    # TOP SECTION: GLOBAL SETTINGS
+    # ==========================================================================
+    st.markdown("### Global Settings")
+
+    # Grid Selection
+    try:
+        all_grids = load_distinct_grids(session)
+    except:
+        all_grids = [grid_id]
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        default_grids = st.session_state.get('ps_grids', [grid_id])
+        selected_grids = st.multiselect(
+            "Select Grids for Portfolio",
+            options=all_grids,
+            default=default_grids,
+            max_selections=20,
+            key="ps_grids"
+        )
+
+    with col2:
+        if st.button("Load King Ranch", key="ps_load_kr"):
+            try:
+                target_grid_mapping = {}
+                for county, grid_ids in KING_RANCH_PRESET['counties'].items():
+                    for gid_num in grid_ids:
+                        target_grid_mapping[gid_num] = f"{gid_num} ({county} - TX)"
+
+                preset_grid_ids = []
+                for numeric_id in KING_RANCH_PRESET['grids']:
+                    target_str = target_grid_mapping[numeric_id]
+                    if target_str in all_grids:
+                        preset_grid_ids.append(target_str)
+                    else:
+                        for grid_option in all_grids:
+                            if extract_numeric_grid_id(grid_option) == numeric_id:
+                                preset_grid_ids.append(grid_option)
+                                break
+
+                st.session_state.ps_grids = preset_grid_ids
+                st.session_state.productivity_factor = 1.35
+                st.success("King Ranch loaded!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    if not selected_grids:
+        st.warning("Select at least one grid to continue.")
+        return
+
+    # Scenario and Policy Parameters
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        scenario_options = [
+            'All Years (except Current Year)',
+            'ENSO Phase: La Nina',
+            'ENSO Phase: El Nino',
+            'ENSO Phase: Neutral',
+            'Custom Range'
+        ]
+        selected_scenario = st.selectbox("Scenario", scenario_options, key="ps_scenario")
+
+    with col2:
+        coverage_level = st.selectbox(
+            "Coverage Level",
+            [0.70, 0.75, 0.80, 0.85, 0.90],
+            index=2,
+            format_func=lambda x: f"{x:.0%}",
+            key="ps_coverage"
+        )
+
+    with col3:
+        st.metric("Productivity Factor", f"{productivity_factor:.0%}")
+
+    # Year range (if custom)
+    if selected_scenario == 'Custom Range':
+        col1, col2 = st.columns(2)
+        start_year = col1.selectbox("Start Year", list(range(1948, 2026)), index=62, key="ps_start")
+        end_year = col2.selectbox("End Year", list(range(1948, 2026)), index=76, key="ps_end")
+    else:
+        start_year = 1948
+        end_year = 2024
+
+    st.divider()
+
+    # ==========================================================================
+    # MIDDLE SECTION: THE CHAMPION (BASELINE)
+    # ==========================================================================
+    st.markdown("### The Champion (Baseline)")
+    st.caption("Define your manual baseline strategy. This is what the AI will try to beat.")
+
+    # Champion Acreage Configuration
+    with st.expander("Champion Acreage per Grid", expanded=True):
+        champion_acres = {}
+        cols = st.columns(min(4, len(selected_grids)))
+        for idx, gid in enumerate(selected_grids):
+            with cols[idx % 4]:
+                numeric_id = extract_numeric_grid_id(gid)
+                default_acres = KING_RANCH_PRESET['acres'].get(numeric_id, total_insured_acres)
+                champion_acres[gid] = st.number_input(
+                    f"{gid}",
+                    min_value=1,
+                    value=default_acres,
+                    step=10,
+                    key=f"ps_champ_acres_{gid}"
+                )
+
+    # Champion Interval Allocations
+    champion_allocations = {}
+    champion_all_valid = True
+
+    with st.expander("Champion Interval Allocations", expanded=True):
+        for gid in selected_grids:
+            st.markdown(f"**{gid}**")
+            alloc_dict, is_valid = render_allocation_inputs(f"ps_champ_{gid}")
+            champion_allocations[gid] = alloc_dict
+            if not is_valid:
+                champion_all_valid = False
+
+    # Champion Run Button
+    if st.button("Run Champion Backtest", key="ps_run_champion", disabled=not champion_all_valid):
+        with st.spinner("Running Champion backtest..."):
+            champion_df, champion_grid_results, champion_metrics = run_portfolio_backtest(
+                session, selected_grids, champion_allocations, champion_acres,
+                start_year, end_year, coverage_level, productivity_factor,
+                intended_use, plan_code, selected_scenario
+            )
+
+            st.session_state.champion_results = {
+                'df': champion_df,
+                'grid_results': champion_grid_results,
+                'metrics': champion_metrics,
+                'allocations': champion_allocations,
+                'acres': champion_acres
+            }
+            st.success("Champion backtest complete!")
+
+    # Display Champion Results (if available)
+    if 'champion_results' in st.session_state and st.session_state.champion_results:
+        champ = st.session_state.champion_results
+        metrics = champ.get('metrics', {})
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Cumulative ROI", f"{metrics.get('cumulative_roi', 0):.1%}")
+        col2.metric("Risk-Adj Return", f"{metrics.get('risk_adj_return', 0):.2f}")
+        col3.metric("Total Profit", f"${metrics.get('total_profit', 0):,.0f}")
+        col4.metric("Win Rate", f"{metrics.get('profitable_pct', 0):.0%}")
+
+    st.divider()
+
+    # ==========================================================================
+    # BOTTOM SECTION: THE CHALLENGER (OPTIMIZER)
+    # ==========================================================================
+    st.markdown("### The Challenger (AI Optimizer)")
+    st.caption("Configure the AI optimizer to find a better strategy.")
+
+    # Layer 1: Interval Optimization
+    st.markdown("**Layer 1: Interval Optimization**")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        use_marginal_search = st.checkbox(
+            "Use Marginal Search (Perturb Naive Allocation)",
+            value=False,
+            key="ps_challenger_marginal"
+        )
+
+    if use_marginal_search:
+        search_mode = 'marginal'
+        search_iterations = 1000
+        st.info("Marginal search perturbs naive allocation by ±5%")
+    else:
+        with col2:
+            iteration_map = {'Fast': 500, 'Standard': 3000, 'Thorough': 7000, 'Maximum': 15000}
+            search_depth_key = st.select_slider(
+                "Search Depth",
+                options=list(iteration_map.keys()),
+                value='Standard',
+                key="ps_challenger_depth"
+            )
+            search_iterations = iteration_map[search_depth_key]
+            search_mode = 'global'
+        st.caption(f"{search_iterations:,} iterations (Global Search)")
+
+    st.markdown("---")
+
+    # Layer 2: Acreage Optimization (MVO)
+    st.markdown("**Layer 2: Acreage Distribution**")
+
+    optimize_acreage = st.checkbox(
+        "Optimize Acreage Distribution (Mean-Variance Optimization)",
+        value=False,
+        help="Use Markowitz portfolio theory to redistribute acres based on risk-adjusted returns",
+        key="ps_challenger_mvo"
+    )
+
+    risk_aversion = 1.0
+    if optimize_acreage:
+        risk_aversion = st.slider(
+            "Risk Aversion",
+            min_value=0.5,
+            max_value=2.0,
+            value=1.0,
+            step=0.1,
+            help="Lower = chase higher returns. Higher = prioritize stability.",
+            key="ps_challenger_risk"
+        )
+        st.info("MVO will redistribute acres across grids based on historical correlations and returns.")
+
+    st.markdown("---")
+
+    # Layer 3: Budget Constraint
+    st.markdown("**Layer 3: Budget Constraint**")
+
+    enable_budget = st.checkbox(
+        "Enable Budget Constraint",
+        value=False,
+        help="Limit total annual premium spending",
+        key="ps_challenger_budget"
+    )
+
+    annual_budget = 50000
+    if enable_budget:
+        annual_budget = st.number_input(
+            "Maximum Annual Premium Budget ($)",
+            min_value=1000,
+            value=50000,
+            step=1000,
+            key="ps_challenger_budget_amt"
+        )
+
+    st.divider()
+
+    # ==========================================================================
+    # TRAIN CHALLENGER BUTTON
+    # ==========================================================================
+    if st.button("Train Challenger", key="ps_train_challenger", type="primary"):
+
+        if 'champion_results' not in st.session_state or not st.session_state.champion_results:
+            st.warning("Please run the Champion backtest first!")
+        else:
+            try:
+                # ===== STEP 1: Optimize Intervals =====
+                st.write("**Step 1: Optimizing Interval Allocations...**")
+                progress_bar = st.progress(0, text="Starting interval optimization...")
+
+                challenger_allocations = {}
+                challenger_interval_stats = {}
+
+                for idx, gid in enumerate(selected_grids):
+                    progress_bar.progress(
+                        (idx + 1) / len(selected_grids),
+                        text=f"Optimizing intervals for {gid}..."
+                    )
+
+                    best_alloc, best_roi, tested = run_fast_optimization_core(
+                        session, gid, start_year, end_year, plan_code,
+                        productivity_factor, champion_acres[gid], intended_use,
+                        coverage_level, search_iterations, search_mode
+                    )
+
+                    if best_alloc:
+                        challenger_allocations[gid] = best_alloc
+                        challenger_interval_stats[gid] = {
+                            'roi': best_roi,
+                            'tested': tested,
+                            'allocation': best_alloc
+                        }
+                    else:
+                        # Fallback to champion allocation
+                        challenger_allocations[gid] = champion_allocations[gid]
+
+                progress_bar.empty()
+                st.success(f"Interval optimization complete! Tested {sum(s['tested'] for s in challenger_interval_stats.values()):,} strategies.")
+
+                # ===== STEP 2: Acreage Optimization =====
+                challenger_acres = champion_acres.copy()  # Start with champion acres
+
+                if optimize_acreage:
+                    st.write("**Step 2: Optimizing Acreage Distribution (MVO)...**")
+
+                    # Generate base_data_df for MVO
+                    grid_results_for_mvo = {
+                        gid: {'best_strategy': {'allocation': challenger_allocations[gid], 'coverage_level': coverage_level}}
+                        for gid in selected_grids
+                    }
+
+                    base_data_df = generate_base_data_for_mvo(
+                        session, selected_grids, {'allocation': challenger_allocations[gid] for gid in selected_grids},
+                        start_year, end_year, coverage_level, productivity_factor,
+                        intended_use, plan_code
+                    )
+
+                    # Fix: Build proper grid_results structure for MVO
+                    grid_results_for_mvo = {}
+                    for gid in selected_grids:
+                        grid_results_for_mvo[gid] = {
+                            'best_strategy': {
+                                'allocation': challenger_allocations[gid],
+                                'coverage_level': coverage_level
+                            }
+                        }
+
+                    # Regenerate base_data_df properly
+                    base_data_rows = []
+                    for gid in selected_grids:
+                        if gid in challenger_interval_stats:
+                            # Use the stats we already computed
+                            allocation = challenger_allocations[gid]
+
+                            subsidy = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
+                            county_base_value = load_county_base_value(session, gid)
+                            current_rate_year = get_current_rate_year(session)
+                            premium_rates = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
+
+                            dollar_protection = county_base_value * coverage_level * productivity_factor
+
+                            all_indices_df = load_all_indices(session, gid)
+                            all_indices_df = all_indices_df[
+                                (all_indices_df['YEAR'] >= start_year) &
+                                (all_indices_df['YEAR'] <= end_year)
+                            ]
+
+                            for year in range(start_year, end_year + 1):
+                                year_data = all_indices_df[all_indices_df['YEAR'] == year]
+                                if year_data.empty:
+                                    continue
+
+                                year_indemnity = 0
+                                year_premium = 0
+
+                                for interval, pct in allocation.items():
+                                    if pct == 0:
+                                        continue
+
+                                    index_row = year_data[year_data['INTERVAL_NAME'] == interval]
+                                    index_value = float(index_row['INDEX_VALUE'].iloc[0]) if not index_row.empty else 100
+
+                                    premium_rate = premium_rates.get(interval, 0)
+                                    interval_protection = dollar_protection * 1 * pct  # 1 acre
+                                    total_prem = interval_protection * premium_rate
+                                    producer_prem = total_prem - (total_prem * subsidy)
+
+                                    trigger = coverage_level * 100
+                                    shortfall = max(0, (trigger - index_value) / trigger)
+                                    indemnity = shortfall * interval_protection
+
+                                    year_indemnity += indemnity
+                                    year_premium += producer_prem
+
+                                roi = (year_indemnity - year_premium) / year_premium if year_premium > 0 else 0
+                                base_data_rows.append({'year': year, 'grid': gid, 'roi': roi})
+
+                    base_data_df = pd.DataFrame(base_data_rows)
+
+                    if enable_budget:
+                        # MVO with budget constraint
+                        challenger_acres, roi_corr = optimize_grid_allocation(
+                            base_data_df, grid_results_for_mvo, champion_acres,
+                            annual_budget, session, productivity_factor, intended_use, plan_code,
+                            selected_grids, risk_aversion
+                        )
+                    else:
+                        # MVO without budget - use optimize_without_budget
+                        total_acres = sum(champion_acres.values())
+                        challenger_acres = optimize_without_budget(
+                            base_data_df, grid_results_for_mvo, total_acres,
+                            selected_grids, risk_aversion
+                        )
+
+                    st.success("Acreage optimization complete!")
+
+                elif enable_budget:
+                    st.write("**Step 2: Applying Budget Constraint...**")
+
+                    # Calculate current cost with optimized intervals
+                    grid_results_for_cost = {
+                        gid: {'best_strategy': {'allocation': challenger_allocations[gid], 'coverage_level': coverage_level}}
+                        for gid in selected_grids
+                    }
+
+                    total_cost, _ = calculate_annual_premium_cost(
+                        session, selected_grids, champion_acres, grid_results_for_cost,
+                        productivity_factor, intended_use, plan_code
+                    )
+
+                    # Apply proportional scaling
+                    challenger_acres, scale_factor = apply_budget_constraint(
+                        champion_acres, total_cost, annual_budget
+                    )
+
+                    if scale_factor < 1.0:
+                        st.info(f"Acres scaled by {scale_factor:.1%} to fit budget")
+
+                # ===== STEP 3: Final Backtest =====
+                st.write("**Step 3: Running Final Challenger Backtest...**")
+
+                challenger_df, challenger_grid_results, challenger_metrics = run_portfolio_backtest(
+                    session, selected_grids, challenger_allocations, challenger_acres,
+                    start_year, end_year, coverage_level, productivity_factor,
+                    intended_use, plan_code, selected_scenario
+                )
+
+                st.session_state.challenger_results = {
+                    'df': challenger_df,
+                    'grid_results': challenger_grid_results,
+                    'metrics': challenger_metrics,
+                    'allocations': challenger_allocations,
+                    'acres': challenger_acres,
+                    'interval_stats': challenger_interval_stats
+                }
+
+                st.success("Challenger training complete!")
+
+            except Exception as e:
+                st.error(f"Error training challenger: {e}")
+                st.exception(e)
+
+    # ==========================================================================
+    # COMPARISON OUTPUT
+    # ==========================================================================
+    if ('champion_results' in st.session_state and st.session_state.champion_results and
+        'challenger_results' in st.session_state and st.session_state.challenger_results):
+
+        st.divider()
+        st.markdown("### Results: Champion vs. Challenger")
+
+        champ = st.session_state.champion_results
+        chall = st.session_state.challenger_results
+
+        champ_metrics = champ.get('metrics', {})
+        chall_metrics = chall.get('metrics', {})
+
+        # Side-by-Side Metrics Table
+        st.markdown("#### Performance Comparison")
+
+        comparison_data = {
+            'Metric': ['Cumulative ROI', 'Risk-Adjusted Return', 'Total Profit', 'Win Rate', 'Avg Annual ROI'],
+            'Champion': [
+                f"{champ_metrics.get('cumulative_roi', 0):.1%}",
+                f"{champ_metrics.get('risk_adj_return', 0):.2f}",
+                f"${champ_metrics.get('total_profit', 0):,.0f}",
+                f"{champ_metrics.get('profitable_pct', 0):.0%}",
+                f"{champ_metrics.get('avg_roi', 0):.1%}"
+            ],
+            'Challenger': [
+                f"{chall_metrics.get('cumulative_roi', 0):.1%}",
+                f"{chall_metrics.get('risk_adj_return', 0):.2f}",
+                f"${chall_metrics.get('total_profit', 0):,.0f}",
+                f"{chall_metrics.get('profitable_pct', 0):.0%}",
+                f"{chall_metrics.get('avg_roi', 0):.1%}"
+            ],
+            'Difference': [
+                f"{(chall_metrics.get('cumulative_roi', 0) - champ_metrics.get('cumulative_roi', 0)):.1%}",
+                f"{(chall_metrics.get('risk_adj_return', 0) - champ_metrics.get('risk_adj_return', 0)):.2f}",
+                f"${(chall_metrics.get('total_profit', 0) - champ_metrics.get('total_profit', 0)):,.0f}",
+                f"{(chall_metrics.get('profitable_pct', 0) - champ_metrics.get('profitable_pct', 0)):.0%}",
+                f"{(chall_metrics.get('avg_roi', 0) - champ_metrics.get('avg_roi', 0)):.1%}"
+            ]
+        }
+
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+
+        # Winner Banner
+        chall_roi = chall_metrics.get('cumulative_roi', 0)
+        champ_roi = champ_metrics.get('cumulative_roi', 0)
+
+        if chall_roi > champ_roi:
+            improvement = ((chall_roi - champ_roi) / abs(champ_roi) * 100) if champ_roi != 0 else 0
+            st.success(f"**CHALLENGER WINS!** ROI improved by {improvement:.1f}%")
+        elif chall_roi < champ_roi:
+            st.warning("**Champion holds!** The baseline strategy performed better.")
+        else:
+            st.info("**TIE!** Both strategies performed equally.")
+
+        # Side-by-Side Allocation View
+        st.markdown("#### Interval Allocation Comparison")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Champion Allocations**")
+            for gid in selected_grids:
+                alloc = champ['allocations'].get(gid, {})
+                alloc_str = ", ".join([f"{k}: {int(v*100)}%" for k, v in sorted(alloc.items()) if v > 0])
+                st.text(f"{gid}: {alloc_str}")
+
+        with col2:
+            st.markdown("**Challenger Allocations**")
+            for gid in selected_grids:
+                alloc = chall['allocations'].get(gid, {})
+                alloc_str = ", ".join([f"{k}: {int(v*100)}%" for k, v in sorted(alloc.items()) if v > 0])
+                st.text(f"{gid}: {alloc_str}")
+
+        # Acreage Change Table
+        st.markdown("#### Acreage Distribution Changes")
+
+        acre_changes = []
+        for gid in selected_grids:
+            champ_acres = champ['acres'].get(gid, 0)
+            chall_acres = chall['acres'].get(gid, 0)
+            change = chall_acres - champ_acres
+            change_pct = (change / champ_acres * 100) if champ_acres > 0 else 0
+
+            acre_changes.append({
+                'Grid': gid,
+                'Champion Acres': f"{champ_acres:,.0f}",
+                'Challenger Acres': f"{chall_acres:,.0f}",
+                'Change': f"{change:+,.0f}",
+                'Change %': f"{change_pct:+.1f}%"
+            })
+
+        acre_df = pd.DataFrame(acre_changes)
+        st.dataframe(acre_df, use_container_width=True, hide_index=True)
+
+        # Yearly Comparison Chart
+        st.markdown("#### Yearly ROI Comparison")
+
+        if len(champ['df']) > 0 and len(chall['df']) > 0:
+            chart_data = pd.DataFrame({
+                'Year': champ['df']['Year'],
+                'Champion ROI': champ['df']['ROI'] * 100,
+                'Challenger ROI': chall['df']['ROI'] * 100
+            })
+            st.line_chart(chart_data.set_index('Year'))
+
+
+# =============================================================================
 # === 5. TAB 3: BACKTESTING ENGINE (S3) ===
 # =============================================================================
 def render_tab3(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code):
@@ -3585,28 +4319,20 @@ def main():
     st.sidebar.caption("*2025 Rates are used for this application")
     st.sidebar.caption("*Common Parameters are secondary to parameters on each tab")
     
-    tab1, tab2, tab3, tab5, tab4 = st.tabs([
-        "Grid Analysis", 
-        "Decision Support", 
-        "Backtest", 
-        "Portfolio",
-        "Optimizer"
+    tab1, tab2, tab_strategy = st.tabs([
+        "Grid Analysis",
+        "Decision Support",
+        "Portfolio Strategy"
     ])
 
     with tab1:
         render_tab1(session, grid_id)
-    
+
     with tab2:
         render_tab2(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code)
-        
-    with tab3:
-        render_tab3(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code)
-        
-    with tab5:
-        render_tab5(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code)
-    
-    with tab4:
-        render_tab4(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code)
+
+    with tab_strategy:
+        render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code)
 
 if __name__ == "__main__":
     main()
