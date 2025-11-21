@@ -9,18 +9,52 @@ import streamlit as st
 from scipy.optimize import minimize
 from decimal import Decimal, ROUND_HALF_UP
 
-# === ROUNDING HELPER ===
+# === ROUNDING AND PRECISION HELPERS ===
 def round_half_up(value, decimals=2):
     """
     Round using 'round half up' to match PRF official tool.
+    Handles floating-point precision issues by converting to Decimal early.
     Python's built-in round() uses banker's rounding (12.675 -> 12.67).
     PRF Tool uses round half up (12.675 -> 12.68).
     """
-    if decimals == 2:
-        return float(Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+    if value is None or (isinstance(value, float) and (np.isnan(value) or np.isinf(value))):
+        return 0.0
+
+    # Convert to Decimal to avoid floating-point precision issues
+    d = Decimal(str(value))
+
+    # Create quantization string
+    if decimals == 0:
+        quantize_to = Decimal('1')
     else:
-        quantize_str = '0.' + '0' * decimals
-        return float(Decimal(str(value)).quantize(Decimal(quantize_str), rounding=ROUND_HALF_UP))
+        quantize_to = Decimal('0.' + '0' * (decimals - 1) + '1')
+
+    # Round half up and convert back to float
+    return float(d.quantize(quantize_to, rounding=ROUND_HALF_UP))
+
+def calculate_protection(county_base_value, coverage_level, productivity_factor, decimals=2):
+    """
+    Calculate dollar protection with proper precision and rounding.
+    Uses Decimal arithmetic to avoid floating-point errors.
+
+    This prevents issues like 16.90 * 0.75 * 1.0 = 12.674999999999999
+    which would incorrectly round to 12.67 instead of 12.68.
+    """
+    # Convert all inputs to Decimal for precise calculation
+    cbv = Decimal(str(county_base_value))
+    cov = Decimal(str(coverage_level))
+    prod = Decimal(str(productivity_factor))
+
+    # Perform calculation
+    result = cbv * cov * prod
+
+    # Round using round half up
+    if decimals == 0:
+        quantize_to = Decimal('1')
+    else:
+        quantize_to = Decimal('0.' + '0' * (decimals - 1) + '1')
+
+    return float(result.quantize(quantize_to, rounding=ROUND_HALF_UP))
 
 # === GLOBAL CONSTANT ===
 # The 11 valid PRF intervals
@@ -811,7 +845,7 @@ def run_fast_optimization_core(
     premium_rates = load_premium_rates(_session, grid_id, intended_use, [coverage_level], current_rate_year)[coverage_level]
     subsidy = load_subsidies(_session, plan_code, [coverage_level])[coverage_level]
 
-    dollar_protection = county_base_value * coverage_level * productivity_factor
+    dollar_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
     total_protection = dollar_protection * acres
 
     # Build index matrix: (n_years, 11)
@@ -902,7 +936,7 @@ def calculate_yearly_roi_for_grid(
         premium_rates = load_premium_rates(session, grid_id, intended_use, [coverage_level], current_rate_year)[coverage_level]
         subsidy = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
 
-        dollar_protection = county_base_value * coverage_level * productivity_factor
+        dollar_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
         total_protection = dollar_protection * acres
 
         total_indemnity = 0
@@ -983,7 +1017,7 @@ def calculate_annual_premium_cost(
             premium_rates = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
             subsidy = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
 
-            dollar_protection = county_base_value * coverage_level * productivity_factor
+            dollar_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
             total_protection = dollar_protection * acres
 
             grid_premium = 0
@@ -1538,8 +1572,7 @@ def render_tab2(session, grid_id, intended_use, productivity_factor, total_insur
                 actuals_df = session.sql(actuals_query).to_pandas().set_index('INTERVAL_NAME')
                 actuals_df['INDEX_VALUE'] = pd.to_numeric(actuals_df['INDEX_VALUE'], errors='coerce')
 
-                dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
-                dollar_amount_of_protection = round_half_up(dollar_amount_of_protection, 2)
+                dollar_amount_of_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
                 total_policy_protection = dollar_amount_of_protection * total_insured_acres
 
                 roi_df = pd.DataFrame(index=INTERVAL_ORDER_11)
@@ -1640,8 +1673,8 @@ def render_tab2(session, grid_id, intended_use, productivity_factor, total_insur
             st.dataframe(display_df, use_container_width=True)
 
             # Totals
-            total_producer_prem = r['roi_df']['Producer Premium'].apply(lambda x: round(x, 0) if pd.notna(x) else 0).sum()
-            total_indemnity = r['roi_df']['Estimated Indemnity'].apply(lambda x: round(x, 0) if pd.notna(x) else 0).sum(skipna=True)
+            total_producer_prem = r['roi_df']['Producer Premium'].apply(lambda x: round_half_up(x, 0) if pd.notna(x) else 0).sum()
+            total_indemnity = r['roi_df']['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0) if pd.notna(x) else 0).sum(skipna=True)
             net_return = total_indemnity - total_producer_prem
             
             st.subheader("Totals")
@@ -1686,7 +1719,7 @@ def run_portfolio_backtest(
             current_rate_year = get_current_rate_year(session)
             premium_rates_df = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
 
-            dollar_protection = county_base_value * coverage_level * productivity_factor
+            dollar_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
             total_protection = dollar_protection * grid_acres.get(gid, 0)
 
             all_indices_df = load_all_indices(session, gid)
@@ -1817,7 +1850,7 @@ def generate_base_data_for_mvo(session, selected_grids, grid_results_with_alloca
             current_rate_year = get_current_rate_year(session)
             premium_rates = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
 
-            dollar_protection = county_base_value * coverage_level * productivity_factor
+            dollar_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
             # Use 1 acre for normalized ROI calculation
             total_protection = dollar_protection * 1
 
@@ -2910,7 +2943,7 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                             current_rate_year = get_current_rate_year(session)
                             premium_rates = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
 
-                            dollar_protection = county_base_value * coverage_level * productivity_factor
+                            dollar_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
 
                             all_indices_df = load_all_indices(session, gid)
                             all_indices_df = all_indices_df[
@@ -3150,8 +3183,7 @@ def render_tab3(session, grid_id, intended_use, productivity_factor, total_insur
                 county_base_value = load_county_base_value(session, grid_id)
                 current_rate_year = get_current_rate_year(session)
                 premium_rates_df = load_premium_rates(session, grid_id, intended_use, [coverage_level], current_rate_year)[coverage_level]
-                dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
-                dollar_amount_of_protection = round_half_up(dollar_amount_of_protection, 2)
+                dollar_amount_of_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
                 total_policy_protection = dollar_amount_of_protection * total_insured_acres
                 all_indices_df = load_all_indices(session, grid_id)
                 
@@ -3173,8 +3205,8 @@ def render_tab3(session, grid_id, intended_use, productivity_factor, total_insur
                     trigger_level = coverage_level * 100
                     shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
                     roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                    total_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round(x, 0)).sum()
-                    total_producer_prem = roi_df['Producer Premium'].apply(lambda x: round(x, 0)).sum()
+                    total_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
+                    total_producer_prem = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
                     year_roi = (total_indemnity - total_producer_prem) / total_producer_prem if total_producer_prem > 0 else 0.0
                     
                     year_results.append({
@@ -3458,8 +3490,7 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                         county_base_value = load_county_base_value(session, gid)
                         current_rate_year = get_current_rate_year(session)
                         premium_rates_df = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
-                        dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
-                        dollar_amount_of_protection = round_half_up(dollar_amount_of_protection, 2)
+                        dollar_amount_of_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
                         total_policy_protection = dollar_amount_of_protection * grid_acres[gid]
                         all_indices_df = load_all_indices(session, gid)
 
@@ -3494,8 +3525,8 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                             trigger_level = coverage_level * 100
                             shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
                             roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                            total_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round(x, 0)).sum()
-                            total_producer_prem = roi_df['Producer Premium'].apply(lambda x: round(x, 0)).sum()
+                            total_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
+                            total_producer_prem = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
                             year_roi = (total_indemnity - total_producer_prem) / total_producer_prem if total_producer_prem > 0 else 0.0
 
                             year_results.append({
@@ -3827,8 +3858,7 @@ def run_optimization_s4(
     def calculate_roi_for_strategy(allocation, coverage_level):
         subsidy = all_subsidies[coverage_level]
         premiums = all_premiums[coverage_level]
-        dollar_protection = county_base_value * coverage_level * prod_factor
-        dollar_protection = round_half_up(dollar_protection, 2)
+        dollar_protection = calculate_protection(county_base_value, coverage_level, prod_factor)
         total_protection = dollar_protection * acres
         
         year_rois = []
@@ -3858,8 +3888,8 @@ def run_optimization_s4(
                 shortfall_pct = max(0, (trigger - index_value) / trigger)
                 indemnity = shortfall_pct * interval_protection
                 
-                total_indemnity += round(indemnity, 0)
-                total_producer_premium += round(producer_premium, 0)
+                total_indemnity += round_half_up(indemnity, 0)
+                total_producer_premium += round_half_up(producer_premium, 0)
                 
             year_roi = (total_indemnity - total_producer_premium) / total_producer_premium if total_producer_premium > 0 else 0
             year_rois.append(year_roi)
@@ -4607,7 +4637,7 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                             county_base_value = load_county_base_value(session, gid)
                             current_rate_year = get_current_rate_year(session)
                             premium_rates_df = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
-                            dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
+                            dollar_amount_of_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
                             
                             # Use grid-specific acres
                             acres_for_grid = r['grid_acres'].get(gid, total_insured_acres)
@@ -4638,8 +4668,8 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                 shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
                                 roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
                                 
-                                year_premium = roi_df['Producer Premium'].apply(lambda x: round(x, 0)).sum()
-                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round(x, 0)).sum()
+                                year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
+                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
                                 
                                 grid_total_premium += year_premium
                                 grid_total_indemnity += year_indemnity
@@ -4697,7 +4727,7 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                 county_base_value = load_county_base_value(session, gid)
                                 current_rate_year = get_current_rate_year(session)
                                 premium_rates_df = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
-                                dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
+                                dollar_amount_of_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
                                 
                                 # Use grid-specific acres
                                 acres_for_grid = r['grid_acres'].get(gid, total_insured_acres)
@@ -4728,8 +4758,8 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                     shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
                                     roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
                                     
-                                    year_premium = roi_df['Producer Premium'].apply(lambda x: round(x, 0)).sum()
-                                    year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round(x, 0)).sum()
+                                    year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
+                                    year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
                                     
                                     grid_total_premium += year_premium
                                     grid_total_indemnity += year_indemnity
@@ -4829,7 +4859,7 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                             county_base_value = load_county_base_value(session, gid)
                             current_rate_year = get_current_rate_year(session)
                             premium_rates_df = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
-                            dollar_amount_of_protection = county_base_value * coverage_level * productivity_factor
+                            dollar_amount_of_protection = calculate_protection(county_base_value, coverage_level, productivity_factor)
                             
                             acres_for_grid = r['grid_acres'].get(gid, total_insured_acres)
                             total_policy_protection = dollar_amount_of_protection * acres_for_grid
@@ -4860,8 +4890,8 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                 shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
                                 roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
                                 
-                                year_premium = roi_df['Producer Premium'].apply(lambda x: round(x, 0)).sum()
-                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round(x, 0)).sum()
+                                year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
+                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
                                 
                                 curr_grid_premium += year_premium
                                 curr_grid_indemnity += year_indemnity
@@ -4897,8 +4927,8 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                 shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
                                 roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
                                 
-                                year_premium = roi_df['Producer Premium'].apply(lambda x: round(x, 0)).sum()
-                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round(x, 0)).sum()
+                                year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
+                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
                                 
                                 sugg_grid_premium += year_premium
                                 sugg_grid_indemnity += year_indemnity
