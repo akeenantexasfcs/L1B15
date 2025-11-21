@@ -991,18 +991,34 @@ def calculate_annual_premium_cost(
     return total_cost, grid_breakdown
 
 
-def apply_budget_constraint(grid_acres, total_cost, budget_limit):
+def apply_budget_constraint(grid_acres, total_cost, budget_limit, allow_scale_up=False):
     """
-    Scale acres proportionally if over budget.
+    Scale acres proportionally to fit budget.
+
+    Args:
+        grid_acres: Dict of {grid_id: acres}
+        total_cost: Current total premium cost
+        budget_limit: Maximum budget allowed
+        allow_scale_up: If True, scale up acres when under budget to utilize full budget
+
     Returns: (scaled_grid_acres_dict, scale_factor)
     """
-    if total_cost <= budget_limit or total_cost == 0:
+    if total_cost == 0:
         return grid_acres.copy(), 1.0
 
-    scale_factor = budget_limit / total_cost
-    scaled_acres = {gid: acres * scale_factor for gid, acres in grid_acres.items()}
-
-    return scaled_acres, scale_factor
+    if total_cost > budget_limit:
+        # Over budget - scale DOWN
+        scale_factor = budget_limit / total_cost
+        scaled_acres = {gid: acres * scale_factor for gid, acres in grid_acres.items()}
+        return scaled_acres, scale_factor
+    elif allow_scale_up and total_cost < budget_limit:
+        # Under budget and scale-up enabled - scale UP to fill budget
+        scale_factor = budget_limit / total_cost
+        scaled_acres = {gid: acres * scale_factor for gid, acres in grid_acres.items()}
+        return scaled_acres, scale_factor
+    else:
+        # Within budget (or under budget but scale-up disabled)
+        return grid_acres.copy(), 1.0
 
 
 def optimize_grid_allocation(
@@ -2706,14 +2722,24 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     )
 
     annual_budget = 50000
+    allow_scale_up = False
     if enable_budget:
-        annual_budget = st.number_input(
-            "Maximum Annual Premium Budget ($)",
-            min_value=1000,
-            value=50000,
-            step=1000,
-            key="ps_challenger_budget_amt"
-        )
+        budget_col1, budget_col2 = st.columns(2)
+        with budget_col1:
+            annual_budget = st.number_input(
+                "Maximum Annual Premium Budget ($)",
+                min_value=1000,
+                value=50000,
+                step=1000,
+                key="ps_challenger_budget_amt"
+            )
+        with budget_col2:
+            allow_scale_up = st.checkbox(
+                "Auto-fill Budget (Scale Up Acres)",
+                value=False,
+                help="If the optimized strategy comes in under budget, automatically scale up acres to utilize the full budget.",
+                key="ps_challenger_autofill"
+            )
 
     st.divider()
 
@@ -2866,13 +2892,17 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                         productivity_factor, intended_use, plan_code
                     )
 
-                    # Apply proportional scaling
+                    # Apply proportional scaling (with optional scale-up)
                     challenger_acres, scale_factor = apply_budget_constraint(
-                        initial_challenger_acres, total_cost, annual_budget
+                        initial_challenger_acres, total_cost, annual_budget, allow_scale_up=allow_scale_up
                     )
 
                     if scale_factor < 1.0:
-                        st.info(f"Acres scaled by {scale_factor:.1%} to fit budget")
+                        st.info(f"Acres scaled DOWN by {scale_factor:.1%} to fit budget (premium was ${total_cost:,.0f})")
+                    elif scale_factor > 1.0:
+                        st.success(f"Acres scaled UP by {scale_factor:.1%} to fill budget (premium was ${total_cost:,.0f}, budget is ${annual_budget:,.0f})")
+                    else:
+                        st.info(f"Budget constraint not binding (premium ${total_cost:,.0f} within budget ${annual_budget:,.0f})")
 
                 # ===== STEP 3: Final Backtest =====
                 st.write("**Step 3: Running Final Challenger Backtest...**")
