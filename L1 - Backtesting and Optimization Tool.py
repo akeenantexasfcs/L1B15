@@ -98,14 +98,15 @@ def load_distinct_grids(_session):
 
 @st.cache_data(ttl=3600)
 def load_all_indices(_session, grid_id):
-    """Fetches all historical rainfall data for a single grid."""
+    """Fetches all historical rainfall data for a single grid, including ENSO phase."""
     # Extract numeric portion from formatted grid ID (e.g., "9128 (Jim Wells - TX)" -> 9128)
     numeric_grid_id = extract_numeric_grid_id(grid_id)
-    
+
     all_indices_query = f"""
-        SELECT 
-            YEAR, INTERVAL_NAME, INDEX_VALUE, INTERVAL_CODE, INTERVAL_MAPPING_TS_TEXT
-        FROM RAIN_INDEX_PLATINUM_ENHANCED 
+        SELECT
+            YEAR, INTERVAL_NAME, INDEX_VALUE, INTERVAL_CODE, INTERVAL_MAPPING_TS_TEXT,
+            OPTICAL_MAPPING_CPC
+        FROM RAIN_INDEX_PLATINUM_ENHANCED
         WHERE GRID_ID = {numeric_grid_id}
         ORDER BY YEAR, INTERVAL_CODE
     """
@@ -114,6 +115,30 @@ def load_all_indices(_session, grid_id):
     # FILTER OUT ROWS WITH NO RAINFALL DATA (for incomplete years like 2025)
     df = df.dropna(subset=['INDEX_VALUE'])
     return df
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def filter_indices_by_scenario(all_indices_df, scenario, start_year=1948, end_year=2024):
+    """
+    Filter indices dataframe by scenario selection.
+    Cached for performance when re-running with same parameters.
+    """
+    if scenario == 'All Years (except Current Year)':
+        return all_indices_df[all_indices_df['YEAR'] < 2025]
+    elif scenario == 'ENSO Phase: La Nina':
+        if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
+            return all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'La Nina') & (all_indices_df['YEAR'] < 2025)]
+        return all_indices_df[all_indices_df['YEAR'] < 2025]
+    elif scenario == 'ENSO Phase: El Nino':
+        if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
+            return all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'El Nino') & (all_indices_df['YEAR'] < 2025)]
+        return all_indices_df[all_indices_df['YEAR'] < 2025]
+    elif scenario == 'ENSO Phase: Neutral':
+        if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
+            return all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'Neutral') & (all_indices_df['YEAR'] < 2025)]
+        return all_indices_df[all_indices_df['YEAR'] < 2025]
+    else:  # Select my own interval
+        return all_indices_df[(all_indices_df['YEAR'] >= start_year) & (all_indices_df['YEAR'] <= end_year)]
+
 
 @st.cache_data(ttl=3600)
 def load_county_base_value(_session, grid_id):
@@ -201,80 +226,131 @@ def has_adjacent_intervals_in_list(intervals_list):
     return False  # No adjacent intervals found
 
 def generate_allocations(intervals_to_use, num_intervals):
-    """Generate allocation percentages for N intervals, respecting 50% max"""
+    """
+    Generate allocation percentages for N intervals, respecting all rules:
+    - Only whole number percentages (1% increments)
+    - Each interval: 0% OR 10-50%
+    - Total must equal exactly 100%
+    - Max 50% per interval
+
+    Returns allocations as decimals (0.20 = 20%)
+    """
     allocations = []
+
     if num_intervals == 1:
-        # 1-interval: 50% (to respect rule)
-        allocations.append({intervals_to_use[0]: 0.5})
-    
+        # 1-interval: 50% max (can't reach 100% with one interval at 50% max)
+        # This is actually invalid per rules - would need 2+ intervals
+        allocations.append({intervals_to_use[0]: 0.50})
+
     elif num_intervals == 2:
         # 2-interval: Only 50/50 split is valid
-        allocations.append({intervals_to_use[0]: 0.5, intervals_to_use[1]: 0.5})
-    
+        allocations.append({intervals_to_use[0]: 0.50, intervals_to_use[1]: 0.50})
+
     elif num_intervals == 3:
-        # 3-interval: equal, max-one, and intermediate patterns
+        # 3-interval patterns (whole numbers summing to 100%)
         splits = [
-            (0.34, 0.33, 0.33),  # Equal
-            (0.50, 0.25, 0.25),  # Max one
-            (0.40, 0.30, 0.30),  # Moderate concentration
-            (0.45, 0.30, 0.25),  # Graduated
+            (34, 33, 33),  # Equal-ish (100%)
+            (50, 25, 25),  # Max one (100%)
+            (40, 30, 30),  # Moderate (100%)
+            (45, 30, 25),  # Graduated (100%)
+            (50, 30, 20),  # Heavy concentration (100%)
+            (40, 35, 25),  # Balanced (100%)
         ]
         for s in splits:
-            allocations.append({intervals_to_use[i]: s[i] for i in range(3)})
-    
+            allocations.append({intervals_to_use[i]: s[i]/100.0 for i in range(3)})
+
     elif num_intervals == 4:
-        # 4-interval: equal, max-one, and intermediate patterns
+        # 4-interval patterns (whole numbers summing to 100%)
         splits = [
-            (0.25, 0.25, 0.25, 0.25),  # Equal
-            (0.50, 0.20, 0.20, 0.10),  # Max one
-            (0.40, 0.20, 0.20, 0.20),  # Moderate concentration
-            (0.35, 0.25, 0.25, 0.15),  # Graduated
-            (0.30, 0.30, 0.20, 0.20),  # Two primaries
+            (25, 25, 25, 25),  # Equal (100%)
+            (50, 20, 15, 15),  # Max one (100%)
+            (40, 20, 20, 20),  # Moderate (100%)
+            (35, 25, 25, 15),  # Graduated (100%)
+            (30, 30, 20, 20),  # Two primaries (100%)
+            (40, 25, 20, 15),  # Tiered (100%)
+            (35, 30, 20, 15),  # Balanced (100%)
         ]
         for s in splits:
-            allocations.append({intervals_to_use[i]: s[i] for i in range(4)})
-    
+            allocations.append({intervals_to_use[i]: s[i]/100.0 for i in range(4)})
+
     elif num_intervals == 5:
-        # 5-interval: equal, max-one, and intermediate patterns
+        # 5-interval patterns (whole numbers summing to 100%)
         splits = [
-            (0.20, 0.20, 0.20, 0.20, 0.20),      # Equal
-            (0.50, 0.125, 0.125, 0.125, 0.125),  # Max one
-            (0.30, 0.20, 0.20, 0.20, 0.10),      # Moderate concentration
-            (0.40, 0.15, 0.15, 0.15, 0.15),      # Higher concentration
-            (0.25, 0.25, 0.20, 0.15, 0.15),      # Graduated
-            (0.35, 0.20, 0.15, 0.15, 0.15),      # Two-tier
+            (20, 20, 20, 20, 20),  # Equal (100%)
+            (50, 15, 15, 10, 10),  # Max one (100%)
+            (30, 20, 20, 15, 15),  # Moderate (100%)
+            (40, 15, 15, 15, 15),  # Higher concentration (100%)
+            (25, 25, 20, 15, 15),  # Graduated (100%)
+            (35, 20, 15, 15, 15),  # Two-tier (100%)
+            (30, 25, 20, 15, 10),  # Descending (100%)
         ]
         for s in splits:
-            allocations.append({intervals_to_use[i]: s[i] for i in range(5)})
-                
+            allocations.append({intervals_to_use[i]: s[i]/100.0 for i in range(5)})
+
     elif num_intervals == 6:
-        # 6-interval: equal, max-one, and intermediate patterns
+        # 6-interval patterns (whole numbers summing to 100%)
         splits = [
-            (0.17, 0.17, 0.17, 0.17, 0.16, 0.16),  # Equal
-            (0.50, 0.10, 0.10, 0.10, 0.10, 0.10),  # Max one
-            (0.30, 0.15, 0.15, 0.15, 0.15, 0.10),  # Moderate concentration
-            (0.40, 0.12, 0.12, 0.12, 0.12, 0.12),  # Higher concentration
-            (0.25, 0.20, 0.15, 0.15, 0.15, 0.10),  # Graduated
-            (0.35, 0.15, 0.15, 0.15, 0.10, 0.10),  # Two-tier
+            (17, 17, 17, 17, 16, 16),  # Equal-ish (100%)
+            (50, 10, 10, 10, 10, 10),  # Max one (100%)
+            (30, 15, 15, 15, 15, 10),  # Moderate (100%)
+            (40, 12, 12, 12, 12, 12),  # Higher concentration (100%)
+            (25, 20, 15, 15, 15, 10),  # Graduated (100%)
+            (35, 15, 15, 15, 10, 10),  # Two-tier (100%)
+            (20, 20, 15, 15, 15, 15),  # Balanced (100%)
         ]
         for s in splits:
-            allocations.append({intervals_to_use[i]: s[i] for i in range(6)})
+            allocations.append({intervals_to_use[i]: s[i]/100.0 for i in range(6)})
 
     return allocations
+
+def is_valid_allocation(alloc_dict):
+    """
+    Check if allocation meets all rules:
+    - Whole number percentages (1% increments)
+    - Each interval: 0% OR 10-50%
+    - Total equals 100%
+    - Max 50% per interval
+    """
+    total = sum(alloc_dict.values())
+    if abs(total - 1.0) > 0.001:
+        return False
+
+    for interval, pct in alloc_dict.items():
+        # Check max 50%
+        if pct > 0.50:
+            return False
+        # Check 10% minimum (must be 0% or >= 10%)
+        if pct > 0 and pct < 0.10:
+            return False
+        # Check whole number (allow small floating point errors)
+        pct_as_percent = pct * 100
+        if abs(pct_as_percent - round(pct_as_percent)) > 0.001:
+            return False
+
+    return True
+
 
 def generate_marginal_variations(base_allocation_dict):
     """
     Generate subtle variations of an existing King Ranch allocation.
     Returns list of allocation dictionaries (as decimals, not percentages).
+    All variations maintain whole number percentages and 10% minimum rule.
     """
     variations = []
-    
-    # Convert percentages to decimals if needed
-    base_alloc = {k: v/100.0 if v > 1 else v for k, v in base_allocation_dict.items() if v > 0}
-    
+
+    # Convert percentages to decimals if needed, round to whole percentages
+    base_alloc = {}
+    for k, v in base_allocation_dict.items():
+        if v > 0:
+            decimal_val = v / 100.0 if v > 1 else v
+            # Round to nearest whole percentage
+            decimal_val = round(decimal_val * 100) / 100.0
+            base_alloc[k] = decimal_val
+
     # 1. Original allocation (normalized to decimals)
-    variations.append(base_alloc.copy())
-    
+    if is_valid_allocation(base_alloc):
+        variations.append(base_alloc.copy())
+
     # 2. Shift forward by one month
     shifted_forward = {}
     for interval, pct in base_alloc.items():
@@ -282,10 +358,10 @@ def generate_marginal_variations(base_allocation_dict):
         new_idx = (idx + 1) % len(INTERVAL_ORDER_11)
         new_interval = INTERVAL_ORDER_11[new_idx]
         shifted_forward[new_interval] = pct
-    
-    if not has_adjacent_intervals_in_list(list(shifted_forward.keys())):
+
+    if not has_adjacent_intervals_in_list(list(shifted_forward.keys())) and is_valid_allocation(shifted_forward):
         variations.append(shifted_forward)
-    
+
     # 3. Shift backward by one month
     shifted_backward = {}
     for interval, pct in base_alloc.items():
@@ -293,10 +369,10 @@ def generate_marginal_variations(base_allocation_dict):
         new_idx = (idx - 1) % len(INTERVAL_ORDER_11)
         new_interval = INTERVAL_ORDER_11[new_idx]
         shifted_backward[new_interval] = pct
-    
-    if not has_adjacent_intervals_in_list(list(shifted_backward.keys())):
+
+    if not has_adjacent_intervals_in_list(list(shifted_backward.keys())) and is_valid_allocation(shifted_backward):
         variations.append(shifted_backward)
-    
+
     # 4. Shift forward by two months
     shifted_forward_2 = {}
     for interval, pct in base_alloc.items():
@@ -304,10 +380,10 @@ def generate_marginal_variations(base_allocation_dict):
         new_idx = (idx + 2) % len(INTERVAL_ORDER_11)
         new_interval = INTERVAL_ORDER_11[new_idx]
         shifted_forward_2[new_interval] = pct
-    
-    if not has_adjacent_intervals_in_list(list(shifted_forward_2.keys())):
+
+    if not has_adjacent_intervals_in_list(list(shifted_forward_2.keys())) and is_valid_allocation(shifted_forward_2):
         variations.append(shifted_forward_2)
-    
+
     # 5. Shift backward by two months
     shifted_backward_2 = {}
     for interval, pct in base_alloc.items():
@@ -315,76 +391,94 @@ def generate_marginal_variations(base_allocation_dict):
         new_idx = (idx - 2) % len(INTERVAL_ORDER_11)
         new_interval = INTERVAL_ORDER_11[new_idx]
         shifted_backward_2[new_interval] = pct
-    
-    if not has_adjacent_intervals_in_list(list(shifted_backward_2.keys())):
+
+    if not has_adjacent_intervals_in_list(list(shifted_backward_2.keys())) and is_valid_allocation(shifted_backward_2):
         variations.append(shifted_backward_2)
-    
+
     # 6. Minor percentage adjustments (redistribute ±1% between intervals)
+    # Only produce variations that maintain 10% minimum rule
     if len(base_alloc) >= 2:
         intervals_list = list(base_alloc.keys())
         for i in range(len(intervals_list)):
-            for j in range(i+1, len(intervals_list)):
+            for j in range(i + 1, len(intervals_list)):
                 # Create variation: take 1% from interval i, give to interval j
                 variation = base_alloc.copy()
-                if variation[intervals_list[i]] >= 0.02:  # Must have at least 2% to give away 1%
-                    variation[intervals_list[i]] -= 0.01
-                    variation[intervals_list[j]] += 0.01
-                    # Ensure no value exceeds 50%
-                    if all(v <= 0.50 for v in variation.values()):
+                new_val_i = variation[intervals_list[i]] - 0.01
+                new_val_j = variation[intervals_list[j]] + 0.01
+
+                # Check if new values meet 10% minimum rule
+                if (new_val_i == 0 or new_val_i >= 0.10) and new_val_j <= 0.50:
+                    variation[intervals_list[i]] = new_val_i
+                    variation[intervals_list[j]] = new_val_j
+                    if is_valid_allocation(variation):
                         variations.append(variation)
-    
+
     return variations
 
 def generate_incremental_variations(base_allocation_dict):
     """
     Generate incremental percentage adjustments within existing King Ranch allocation.
-    Only does small fine-tuning: ±1%, ±2%, ±3%, ±5% between intervals.
+    Only does small fine-tuning: ±1%, ±2%, ±3%, ±4%, ±5% between intervals.
     Does NOT change which intervals are selected.
     Returns list of allocation dictionaries (as decimals, not percentages).
+    All variations maintain whole number percentages and 10% minimum rule.
     """
     variations = []
-    
-    # Convert percentages to decimals if needed
-    base_alloc = {k: v/100.0 if v > 1 else v for k, v in base_allocation_dict.items() if v > 0}
-    
+
+    # Convert percentages to decimals if needed, round to whole percentages
+    base_alloc = {}
+    for k, v in base_allocation_dict.items():
+        if v > 0:
+            decimal_val = v / 100.0 if v > 1 else v
+            # Round to nearest whole percentage
+            decimal_val = round(decimal_val * 100) / 100.0
+            base_alloc[k] = decimal_val
+
     # Get the intervals that are allocated (non-zero)
     active_intervals = [k for k, v in base_alloc.items() if v > 0]
     num_intervals = len(active_intervals)
-    
+
     if num_intervals == 0:
         return variations
-    
+
     # 1. Original allocation
-    variations.append(base_alloc.copy())
-    
+    if is_valid_allocation(base_alloc):
+        variations.append(base_alloc.copy())
+
     # 2. Small fine-tuning adjustments only: ±1%, ±2%, ±3%, ±4%, ±5%
     small_adjustments = [0.01, 0.02, 0.03, 0.04, 0.05]
-    
+
     for adj in small_adjustments:
         for i in range(num_intervals):
-            for j in range(i+1, num_intervals):
+            for j in range(i + 1, num_intervals):
                 # Take from i, give to j
                 var1 = {k: 0.0 for k in INTERVAL_ORDER_11}
                 for k, v in base_alloc.items():
                     var1[k] = v
-                
-                if var1[active_intervals[i]] >= adj + 0.01:  # Must have enough to give
-                    var1[active_intervals[i]] -= adj
-                    var1[active_intervals[j]] += adj
-                    
-                    if all(v <= 0.50 for v in var1.values()) and abs(sum(var1.values()) - 1.0) < 0.001:
+
+                new_val_i = var1[active_intervals[i]] - adj
+                new_val_j = var1[active_intervals[j]] + adj
+
+                # Check 10% minimum rule (must be 0% or >= 10%)
+                if (new_val_i == 0 or new_val_i >= 0.10) and new_val_j <= 0.50:
+                    var1[active_intervals[i]] = new_val_i
+                    var1[active_intervals[j]] = new_val_j
+                    if is_valid_allocation(var1):
                         variations.append(var1.copy())
-                
+
                 # Take from j, give to i
                 var2 = {k: 0.0 for k in INTERVAL_ORDER_11}
                 for k, v in base_alloc.items():
                     var2[k] = v
-                
-                if var2[active_intervals[j]] >= adj + 0.01:
-                    var2[active_intervals[j]] -= adj
-                    var2[active_intervals[i]] += adj
-                    
-                    if all(v <= 0.50 for v in var2.values()) and abs(sum(var2.values()) - 1.0) < 0.001:
+
+                new_val_j2 = var2[active_intervals[j]] - adj
+                new_val_i2 = var2[active_intervals[i]] + adj
+
+                # Check 10% minimum rule (must be 0% or >= 10%)
+                if (new_val_j2 == 0 or new_val_j2 >= 0.10) and new_val_i2 <= 0.50:
+                    var2[active_intervals[j]] = new_val_j2
+                    var2[active_intervals[i]] = new_val_i2
+                    if is_valid_allocation(var2):
                         variations.append(var2.copy())
 
     return variations
@@ -1481,29 +1575,14 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                         total_policy_protection = dollar_amount_of_protection * grid_acres[gid]
                         all_indices_df = load_all_indices(session, gid)
 
-                        # Apply scenario-based year filtering
-                        if selected_scenario == 'All Years (except Current Year)':
-                            filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
-                        elif selected_scenario == 'ENSO Phase: La Nina':
-                            if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
-                                filtered_df = all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'La Nina') & (all_indices_df['YEAR'] < 2025)]
-                            else:
-                                filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
-                                st.warning(f"ENSO data not available for {gid}, using all years")
-                        elif selected_scenario == 'ENSO Phase: El Nino':
-                            if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
-                                filtered_df = all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'El Nino') & (all_indices_df['YEAR'] < 2025)]
-                            else:
-                                filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
-                                st.warning(f"ENSO data not available for {gid}, using all years")
-                        elif selected_scenario == 'ENSO Phase: Neutral':
-                            if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
-                                filtered_df = all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'Neutral') & (all_indices_df['YEAR'] < 2025)]
-                            else:
-                                filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
-                                st.warning(f"ENSO data not available for {gid}, using all years")
-                        else:  # Select my own interval
-                            filtered_df = all_indices_df[(all_indices_df['YEAR'] >= start_year) & (all_indices_df['YEAR'] <= end_year)]
+                        # Apply scenario-based year filtering using cached helper
+                        filtered_df = filter_indices_by_scenario(
+                            all_indices_df, selected_scenario, start_year, end_year
+                        )
+
+                        # Warn if ENSO filtering was requested but column not available
+                        if 'ENSO Phase' in selected_scenario and 'OPTICAL_MAPPING_CPC' not in all_indices_df.columns:
+                            st.warning(f"ENSO data not available for {gid}, using all years")
 
                         # Get unique years for this grid
                         grid_years = filtered_df['YEAR'].unique()
@@ -2504,20 +2583,11 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                 c3.metric("Cumulative ROI", f"{best['cumulative_roi']:.2%}")
                 c4.metric("Win Rate", f"{best['profitable_pct']:.1%}")
                 c5.metric("Risk-Adj", f"{best['risk_adj_ret']:.2f}")
-                
-                with st.expander(f"Top 5 Strategies for {gid}"):
-                    for i, (idx, row) in enumerate(results_df.head(5).iterrows()):
-                        alloc_str = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(row['allocation'].items(), key=lambda x: x[1], reverse=True) if v > 0])
-                        
-                        if (r.get('search_depth') == 'marginal' or r.get('search_depth') == 'incremental') and i == 0:
-                            numeric_grid_id = extract_numeric_grid_id(gid)
-                            if numeric_grid_id in KING_RANCH_PRESET['allocations']:
-                                baseline_alloc = KING_RANCH_PRESET['allocations'][numeric_grid_id]
-                                baseline_str = ", ".join([f"{k}: {v:.0f}%" for k, v in sorted(baseline_alloc.items(), key=lambda x: x[1], reverse=True) if v > 0])
-                                st.text(f"Baseline: {baseline_str}")
-                        
-                        st.text(f"#{i+1}: {row['coverage_level']:.0%} | {alloc_str}")
-                
+
+                # Show best allocation
+                alloc_str = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(best['allocation'].items(), key=lambda x: x[1], reverse=True) if v > 0])
+                st.caption(f"Best Allocation: {alloc_str}")
+
                 st.divider()
             
             if r['multi_grid_mode']:
