@@ -1008,12 +1008,15 @@ def apply_budget_constraint(grid_acres, total_cost, budget_limit):
 def optimize_grid_allocation(
     base_data_df, grid_results, initial_acres_per_grid,
     annual_budget, session, productivity_factor, intended_use, plan_code,
-    selected_grids, risk_aversion=1.0
+    selected_grids, risk_aversion=1.0, max_turnover=0.20
 ):
     """
     Two-stage optimization with robust error handling:
     Stage 1: Find maximum total acres within budget (binary search)
     Stage 2: Optimize distribution for risk-adjusted returns (scipy SLSQP)
+
+    Args:
+        max_turnover: Maximum relative change allowed for each grid's allocation (0.20 = ±20%)
 
     Returns: (optimized_acres_dict, roi_correlation_df)
     """
@@ -1118,8 +1121,13 @@ def optimize_grid_allocation(
             {'type': 'ineq', 'fun': budget_constraint}  # Budget constraint
         ]
 
-        # Bounds: each weight between 0 and 1
-        bounds = [(0.0, 1.0) for _ in range(n)]
+        # Bounds: constrain each weight to ±max_turnover relative change from initial
+        bounds = []
+        for i in range(n):
+            w_init = initial_weights[i]
+            lower = max(0.0, w_init * (1 - max_turnover))
+            upper = min(1.0, w_init * (1 + max_turnover))
+            bounds.append((lower, upper))
 
         # Optimize
         result = minimize(
@@ -1156,11 +1164,14 @@ def optimize_grid_allocation(
 
 def optimize_without_budget(
     base_data_df, grid_results, max_total_acres,
-    selected_grids, risk_aversion=1.0
+    selected_grids, risk_aversion=1.0, max_turnover=0.20
 ):
     """
     Optimize acre distribution for pure risk-adjusted return without budget constraint.
     Uses mean-variance optimization (Markowitz).
+
+    Args:
+        max_turnover: Maximum relative change allowed for each grid's allocation (0.20 = ±20%)
 
     Returns: optimized_acres_dict
     """
@@ -1190,7 +1201,7 @@ def optimize_without_budget(
                 if gi in cov_matrix.index and gj in cov_matrix.columns:
                     cov[i, j] = cov_matrix.loc[gi, gj]
 
-        # Initial guess
+        # Initial guess: equal distribution as starting point
         initial_weights = np.ones(n) / n
 
         def neg_utility(weights):
@@ -1203,7 +1214,13 @@ def optimize_without_budget(
             {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}
         ]
 
-        bounds = [(0.0, 1.0) for _ in range(n)]
+        # Bounds: constrain each weight to ±max_turnover relative change from initial
+        bounds = []
+        for i in range(n):
+            w_init = initial_weights[i]
+            lower = max(0.0, w_init * (1 - max_turnover))
+            upper = min(1.0, w_init * (1 + max_turnover))
+            bounds.append((lower, upper))
 
         result = minimize(
             neg_utility,
@@ -2547,16 +2564,29 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     )
 
     risk_aversion = 1.0
+    max_turnover = 0.20
     if optimize_acreage:
-        risk_aversion = st.slider(
-            "Risk Aversion",
-            min_value=0.5,
-            max_value=2.0,
-            value=1.0,
-            step=0.1,
-            help="Lower = chase higher returns. Higher = prioritize stability.",
-            key="ps_challenger_risk"
-        )
+        mvo_col1, mvo_col2 = st.columns(2)
+        with mvo_col1:
+            risk_aversion = st.slider(
+                "Risk Aversion",
+                min_value=0.5,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="Lower = chase higher returns. Higher = prioritize stability.",
+                key="ps_challenger_risk"
+            )
+        with mvo_col2:
+            max_turnover = st.slider(
+                "Max Turnover",
+                min_value=0.05,
+                max_value=0.50,
+                value=0.20,
+                step=0.05,
+                help="Limit how much each grid's acreage can change from initial allocation (0.20 = ±20%)",
+                key="ps_challenger_turnover"
+            )
         st.info("MVO will redistribute acres across grids based on historical correlations and returns.")
 
     st.markdown("---")
@@ -2713,14 +2743,14 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                         challenger_acres, roi_corr = optimize_grid_allocation(
                             base_data_df, grid_results_for_mvo, champion_acres,
                             annual_budget, session, productivity_factor, intended_use, plan_code,
-                            selected_grids, risk_aversion
+                            selected_grids, risk_aversion, max_turnover
                         )
                     else:
                         # MVO without budget - use optimize_without_budget
                         total_acres = sum(champion_acres.values())
                         challenger_acres = optimize_without_budget(
                             base_data_df, grid_results_for_mvo, total_acres,
-                            selected_grids, risk_aversion
+                            selected_grids, risk_aversion, max_turnover
                         )
 
                     st.success("Acreage optimization complete!")
@@ -3795,18 +3825,31 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
     )
 
     risk_aversion = 1.0  # Default
+    max_turnover = 0.20  # Default
     if allocation_mode == "Optimized Acres":
         st.info("The optimizer calculates which grids generate the highest returns on average and which grids tend to have bad years simultaneously. It then allocates more acres to high-profit grids that don't fail together, reducing the risk of being 'all-in' when drought hits multiple locations at once.")
 
-        risk_aversion = st.slider(
-            "Risk Tolerance",
-            min_value=0.5,
-            max_value=2.0,
-            value=1.0,
-            step=0.1,
-            help="Lower = chase higher returns. Higher = prioritize stability and diversification.",
-            key="s4_risk_aversion"
-        )
+        opt_col1, opt_col2 = st.columns(2)
+        with opt_col1:
+            risk_aversion = st.slider(
+                "Risk Tolerance",
+                min_value=0.5,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                help="Lower = chase higher returns. Higher = prioritize stability and diversification.",
+                key="s4_risk_aversion"
+            )
+        with opt_col2:
+            max_turnover = st.slider(
+                "Max Turnover",
+                min_value=0.05,
+                max_value=0.50,
+                value=0.20,
+                step=0.05,
+                help="Limit how much each grid's acreage can change from initial allocation (0.20 = ±20%)",
+                key="s4_max_turnover"
+            )
 
     st.divider()
 
@@ -3984,7 +4027,8 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                             intended_use=intended_use,
                             plan_code=plan_code,
                             selected_grids=selected_grids,
-                            risk_aversion=risk_aversion
+                            risk_aversion=risk_aversion,
+                            max_turnover=max_turnover
                         )
                         stage2_info = "Acre distribution optimized for maximum risk-adjusted returns within budget"
 
@@ -4012,7 +4056,8 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                             grid_results=grid_results,
                             max_total_acres=max_acres,
                             selected_grids=selected_grids,
-                            risk_aversion=risk_aversion
+                            risk_aversion=risk_aversion,
+                            max_turnover=max_turnover
                         )
                         stage2_info = "Acre distribution optimized for maximum risk-adjusted returns"
 
