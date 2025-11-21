@@ -1756,17 +1756,18 @@ def generate_base_data_for_mvo(session, selected_grids, grid_results_with_alloca
 
 def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=None,
                                        session=None, productivity_factor=None,
-                                       intended_use=None, plan_code=None, coverage_level=None):
+                                       intended_use=None, plan_code=None, coverage_level=None,
+                                       label="OPTIMIZED AVERAGE"):
     """
     Create a styled allocation table for Champion or Challenger.
 
     Args:
         allocations_dict: Dict mapping grid_id -> {interval: weight (0-1), ...}
-                         Keys should be INTERVAL_ORDER_11 names (Jan-Feb, Feb-Mar, etc.)
         grid_list: List of grid IDs to include
         grid_acres: Optional dict of grid_id -> acres
         session: Optional Snowflake session for premium calculation
         productivity_factor, intended_use, plan_code, coverage_level: Optional params for premium calc
+        label: Label for the summary row (default "OPTIMIZED AVERAGE")
 
     Returns:
         Styled pandas DataFrame ready for display
@@ -1774,6 +1775,7 @@ def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=No
     rows = []
     total_coverage = {interval: 0 for interval in INTERVAL_ORDER_11}
     total_acres = 0
+    total_premium = 0
 
     for gid in grid_list:
         alloc = allocations_dict.get(gid, {})
@@ -1789,29 +1791,46 @@ def create_optimized_allocation_table(allocations_dict, grid_list, grid_acres=No
                 pct = 0
             row_sum += pct
             total_coverage[interval] += pct
-            row[interval] = f"{pct:.0f}%" if pct > 0 else "--"
+            row[interval] = f"{pct:.0f}%"  # Always show as percentage, even 0%
 
-        row['Sum'] = f"{row_sum:.0f}%"
+        row['Row Sum'] = f"{row_sum:.0f}%"
 
         # Add acres if provided
         acres = grid_acres.get(gid, 0) if grid_acres else 0
         total_acres += acres
-        row['Acres'] = f"{acres:,.0f}" if acres > 0 else "--"
+        row['Acres'] = f"{acres:,.0f}"
+
+        # Calculate annual premium if session and params available
+        grid_premium = 0
+        if session and productivity_factor and coverage_level:
+            try:
+                # Try to calculate premium using existing function
+                _, grid_breakdown = calculate_annual_premium_cost(
+                    session, [gid], {gid: acres},
+                    {gid: {'allocation': alloc}},
+                    productivity_factor, intended_use, plan_code
+                )
+                grid_premium = grid_breakdown.get(gid, 0)
+            except:
+                grid_premium = 0
+        total_premium += grid_premium
+        row['Annual Premium ($)'] = f"${grid_premium:,.0f}"
 
         rows.append(row)
 
-    # Add AVERAGE row
-    avg_row = {'Grid': 'AVERAGE'}
+    # Add summary row (OPTIMIZED AVERAGE or PORTFOLIO AVERAGE)
+    avg_row = {'Grid': label}
     avg_row_sum = 0
     grid_count = len(grid_list)
 
     for interval in INTERVAL_ORDER_11:
         avg_pct = total_coverage[interval] / grid_count if grid_count > 0 else 0
         avg_row_sum += avg_pct
-        avg_row[interval] = f"{avg_pct:.0f}%" if avg_pct > 0.5 else "--"
+        avg_row[interval] = f"{avg_pct:.0f}%"
 
-    avg_row['Sum'] = f"{avg_row_sum:.0f}%"
+    avg_row['Row Sum'] = f"{avg_row_sum:.0f}%"
     avg_row['Acres'] = f"{total_acres:,.0f}"
+    avg_row['Annual Premium ($)'] = f"${total_premium:,.0f}"
     rows.append(avg_row)
 
     df = pd.DataFrame(rows)
@@ -1874,10 +1893,16 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
             change = ch_pct - c_pct
             total_changes[interval] += change
 
-            if abs(change) < 0.5:
-                row[interval] = "--"
+            # Format: "+50%", "-50%", or "0%" (NOT "--")
+            if change > 0:
+                row[interval] = f"+{change:.0f}%"
+            elif change < 0:
+                row[interval] = f"{change:.0f}%"
             else:
-                row[interval] = f"{change:+.0f}%"
+                row[interval] = "0%"
+
+        # Net Change column (always 0% since portfolio stays at 100%)
+        row['Net Change'] = "0%"
 
         # Acreage columns
         c_acres = champ_acres.get(gid, 0)
@@ -1889,29 +1914,51 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
 
         row['Champ Acres'] = f"{c_acres:,.0f}"
         row['Chall Acres'] = f"{ch_acres:,.0f}"
-        row['Acre Δ'] = f"{acre_change:+,.0f}" if acre_change != 0 else "--"
+
+        # Format acre change with +/- or 0
+        if acre_change > 0:
+            row['Acre Δ'] = f"+{acre_change:,.0f}"
+        elif acre_change < 0:
+            row['Acre Δ'] = f"{acre_change:,.0f}"
+        else:
+            row['Acre Δ'] = "0"
 
         rows.append(row)
 
-    # Add PORTFOLIO TOTALS row (totals for acres)
+    # Add PORTFOLIO TOTALS row (average allocation changes, total acres)
     totals_row = {'Grid': 'PORTFOLIO TOTALS'}
     grid_count = len(grid_list)
+
     for interval in INTERVAL_ORDER_11:
         avg_change = total_changes[interval] / grid_count if grid_count > 0 else 0
-        totals_row[interval] = f"{avg_change:+.0f}%" if abs(avg_change) >= 0.5 else "--"
+        if avg_change > 0:
+            totals_row[interval] = f"+{avg_change:.0f}%"
+        elif avg_change < 0:
+            totals_row[interval] = f"{avg_change:.0f}%"
+        else:
+            totals_row[interval] = "0%"
+
+    totals_row['Net Change'] = "0%"
 
     # Acre totals for the summary row
     total_acre_change = total_chall_acres - total_champ_acres
     totals_row['Champ Acres'] = f"{total_champ_acres:,.0f}"
     totals_row['Chall Acres'] = f"{total_chall_acres:,.0f}"
-    totals_row['Acre Δ'] = f"{total_acre_change:+,.0f}" if total_acre_change != 0 else "--"
+
+    if total_acre_change > 0:
+        totals_row['Acre Δ'] = f"+{total_acre_change:,.0f}"
+    elif total_acre_change < 0:
+        totals_row['Acre Δ'] = f"{total_acre_change:,.0f}"
+    else:
+        totals_row['Acre Δ'] = "0"
+
     rows.append(totals_row)
 
     df = pd.DataFrame(rows)
 
-    # Style function for red/green gradient on changes
+    # Style function for red/green/gray gradient on changes
     def highlight_change_cell(val):
-        if isinstance(val, str) and val != "--":
+        if isinstance(val, str):
             try:
                 # Handle percentage values
                 if val.endswith('%'):
@@ -1919,27 +1966,36 @@ def create_change_analysis_table(champ_alloc, chall_alloc, champ_acres, chall_ac
                 # Handle acre values with commas
                 elif ',' in val or val.startswith('+') or val.startswith('-'):
                     change = float(val.replace(',', '').replace('+', ''))
+                elif val == "0":
+                    change = 0
                 else:
                     return ''
 
-                if change >= 40:
+                # Color coding
+                if change == 0:
+                    return 'background-color: #e0e0e0'  # Gray for zero
+                elif change >= 40:
                     return 'background-color: #2e7d32; color: white'  # Dark green
                 elif change >= 25:
                     return 'background-color: #4caf50; color: white'  # Medium green
                 elif change >= 10:
                     return 'background-color: #81c784'  # Light green
+                elif change > 0:
+                    return 'background-color: #c8e6c9'  # Very light green
                 elif change <= -40:
                     return 'background-color: #c62828; color: white'  # Dark red
                 elif change <= -25:
                     return 'background-color: #e53935; color: white'  # Medium red
                 elif change <= -10:
                     return 'background-color: #ef9a9a'  # Light red
+                elif change < 0:
+                    return 'background-color: #ffcdd2'  # Very light red
             except:
                 pass
         return ''
 
-    # Apply styling to interval columns and acre change column
-    style_cols = list(INTERVAL_ORDER_11) + ['Acre Δ']
+    # Apply styling to interval columns, Net Change, and acre change column
+    style_cols = list(INTERVAL_ORDER_11) + ['Net Change', 'Acre Δ']
     styled = df.style.applymap(highlight_change_cell, subset=[c for c in style_cols if c in df.columns])
 
     return styled
@@ -2512,24 +2568,30 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
 
         # === ALLOCATION COMPARISON: VERTICAL STACK ===
         st.markdown("#### Interval Allocation Comparison")
-        st.caption("Green = allocation intensity | Red/Green changes = decrease/increase")
+        st.caption("Green = allocation intensity | Gray = 0% | Red/Green in changes = decrease/increase")
 
         # Champion Table (full width)
         st.markdown("**Champion (Baseline)**")
         champ_styled = create_optimized_allocation_table(
-            champ['allocations'], selected_grids, grid_acres=champ['acres']
+            champ['allocations'], selected_grids, grid_acres=champ['acres'],
+            session=session, productivity_factor=productivity_factor,
+            intended_use=intended_use, plan_code=plan_code, coverage_level=coverage_level,
+            label="CHAMPION AVERAGE"
         )
         st.dataframe(champ_styled, use_container_width=True, hide_index=True)
 
         # Challenger Table (full width)
         st.markdown("**Challenger (Optimized)**")
         chall_styled = create_optimized_allocation_table(
-            chall['allocations'], selected_grids, grid_acres=chall['acres']
+            chall['allocations'], selected_grids, grid_acres=chall['acres'],
+            session=session, productivity_factor=productivity_factor,
+            intended_use=intended_use, plan_code=plan_code, coverage_level=coverage_level,
+            label="OPTIMIZED AVERAGE"
         )
         st.dataframe(chall_styled, use_container_width=True, hide_index=True)
 
         # Change Analysis Table (full width, includes acreage changes)
-        st.markdown("**Change Analysis** (includes acreage changes)")
+        st.markdown("**Allocation Changes by Grid and Interval**")
         change_styled = create_change_analysis_table(
             champ['allocations'], chall['allocations'],
             champ['acres'], chall['acres'],
