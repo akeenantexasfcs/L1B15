@@ -2064,6 +2064,171 @@ def create_performance_comparison_table(champ_metrics, chall_metrics):
     return pd.DataFrame(comparison_data)
 
 
+def render_allocation_text_table(allocations_dict, grid_list, grid_acres=None, label="AVERAGE"):
+    """
+    Render an allocation table as stable text output.
+
+    Args:
+        allocations_dict: Dict mapping grid_id -> {interval: weight (0-1), ...}
+        grid_list: List of grid IDs to include
+        grid_acres: Optional dict of grid_id -> acres
+        label: Label for the summary row
+    """
+    # Build data rows
+    rows = []
+    total_coverage = {interval: 0 for interval in INTERVAL_ORDER_11}
+    total_acres = 0
+
+    for gid in grid_list:
+        alloc = allocations_dict.get(gid, {})
+        row = {'Grid': str(gid)[:20]}  # Truncate long grid names
+        row_sum = 0
+
+        for interval in INTERVAL_ORDER_11:
+            pct_raw = alloc.get(interval, 0)
+            pct = pct_raw * 100 if isinstance(pct_raw, (int, float)) and pct_raw <= 1 else (pct_raw if isinstance(pct_raw, (int, float)) else 0)
+            row_sum += pct
+            total_coverage[interval] += pct
+            row[interval] = f"{pct:.0f}%" if pct > 0 else "--"
+
+        row['Row Sum'] = f"{row_sum:.0f}%"
+        acres = grid_acres.get(gid, 0) if grid_acres else 0
+        total_acres += acres
+        row['Acres'] = f"{acres:,.0f}"
+        rows.append(row)
+
+    # Summary row
+    grid_count = len(grid_list)
+    avg_row = {'Grid': label}
+    avg_sum = 0
+    for interval in INTERVAL_ORDER_11:
+        avg_pct = total_coverage[interval] / grid_count if grid_count > 0 else 0
+        avg_sum += avg_pct
+        avg_row[interval] = f"{avg_pct:.0f}%"
+    avg_row['Row Sum'] = f"{avg_sum:.0f}%"
+    avg_row['Acres'] = f"{total_acres:,.0f}"
+
+    # Render header
+    header = f"{'Grid':<20}"
+    for interval in INTERVAL_ORDER_11:
+        short_name = interval[:7]  # "Jan-Feb" etc
+        header += f" {short_name:>7}"
+    header += f" {'Row Sum':>8} {'Acres':>10}"
+
+    st.text(header)
+    st.text("─" * len(header))
+
+    # Render data rows
+    for row in rows:
+        line = f"{row['Grid']:<20}"
+        for interval in INTERVAL_ORDER_11:
+            line += f" {row[interval]:>7}"
+        line += f" {row['Row Sum']:>8} {row['Acres']:>10}"
+        st.text(line)
+
+    # Render summary row
+    st.text("═" * len(header))
+    line = f"{avg_row['Grid']:<20}"
+    for interval in INTERVAL_ORDER_11:
+        line += f" {avg_row[interval]:>7}"
+    line += f" {avg_row['Row Sum']:>8} {avg_row['Acres']:>10}"
+    st.text(line)
+
+
+def render_change_analysis_text_table(champ_alloc, chall_alloc, champ_acres, chall_acres, grid_list):
+    """
+    Render a change analysis table as stable text output.
+
+    Args:
+        champ_alloc: Champion allocations dict
+        chall_alloc: Challenger allocations dict
+        champ_acres: Champion acres dict
+        chall_acres: Challenger acres dict
+        grid_list: List of grid IDs
+    """
+    # Build data rows
+    rows = []
+    total_changes = {interval: 0 for interval in INTERVAL_ORDER_11}
+    total_champ_acres = 0
+    total_chall_acres = 0
+
+    for gid in grid_list:
+        c_alloc = champ_alloc.get(gid, {})
+        ch_alloc = chall_alloc.get(gid, {})
+        row = {'Grid': str(gid)[:20]}
+
+        for interval in INTERVAL_ORDER_11:
+            c_val = c_alloc.get(interval, 0)
+            ch_val = ch_alloc.get(interval, 0)
+            c_pct = c_val * 100 if isinstance(c_val, (int, float)) and c_val <= 1 else (c_val if isinstance(c_val, (int, float)) else 0)
+            ch_pct = ch_val * 100 if isinstance(ch_val, (int, float)) and ch_val <= 1 else (ch_val if isinstance(ch_val, (int, float)) else 0)
+            change = ch_pct - c_pct
+            total_changes[interval] += change
+
+            if change > 0:
+                row[interval] = f"+{change:.0f}%"
+            elif change < 0:
+                row[interval] = f"{change:.0f}%"
+            else:
+                row[interval] = "0%"
+
+        row['Net'] = "0%"
+
+        c_acres = champ_acres.get(gid, 0)
+        ch_acres = chall_acres.get(gid, 0)
+        acre_change = ch_acres - c_acres
+        total_champ_acres += c_acres
+        total_chall_acres += ch_acres
+
+        row['Champ'] = f"{c_acres:,.0f}"
+        row['Chall'] = f"{ch_acres:,.0f}"
+        row['Δ Acres'] = f"{acre_change:+,.0f}" if acre_change != 0 else "0"
+        rows.append(row)
+
+    # Totals row
+    grid_count = len(grid_list)
+    totals_row = {'Grid': 'PORTFOLIO TOTALS'}
+    for interval in INTERVAL_ORDER_11:
+        avg_change = total_changes[interval] / grid_count if grid_count > 0 else 0
+        if avg_change > 0:
+            totals_row[interval] = f"+{avg_change:.0f}%"
+        elif avg_change < 0:
+            totals_row[interval] = f"{avg_change:.0f}%"
+        else:
+            totals_row[interval] = "0%"
+    totals_row['Net'] = "0%"
+    total_acre_change = total_chall_acres - total_champ_acres
+    totals_row['Champ'] = f"{total_champ_acres:,.0f}"
+    totals_row['Chall'] = f"{total_chall_acres:,.0f}"
+    totals_row['Δ Acres'] = f"{total_acre_change:+,.0f}" if total_acre_change != 0 else "0"
+
+    # Render header
+    header = f"{'Grid':<20}"
+    for interval in INTERVAL_ORDER_11:
+        short_name = interval[:7]
+        header += f" {short_name:>7}"
+    header += f" {'Net':>5} {'Champ':>10} {'Chall':>10} {'Δ Acres':>10}"
+
+    st.text(header)
+    st.text("─" * len(header))
+
+    # Render data rows
+    for row in rows:
+        line = f"{row['Grid']:<20}"
+        for interval in INTERVAL_ORDER_11:
+            line += f" {row[interval]:>7}"
+        line += f" {row['Net']:>5} {row['Champ']:>10} {row['Chall']:>10} {row['Δ Acres']:>10}"
+        st.text(line)
+
+    # Render totals row
+    st.text("═" * len(header))
+    line = f"{totals_row['Grid']:<20}"
+    for interval in INTERVAL_ORDER_11:
+        line += f" {totals_row[interval]:>7}"
+    line += f" {totals_row['Net']:>5} {totals_row['Champ']:>10} {totals_row['Chall']:>10} {totals_row['Δ Acres']:>10}"
+    st.text(line)
+
+
 def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code):
     """
     Unified Portfolio Strategy tab implementing Champion vs Challenger workflow.
@@ -2566,38 +2731,36 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         else:
             st.info("**TIE!** Both strategies performed equally.")
 
-        # === ALLOCATION COMPARISON: VERTICAL STACK ===
+        # === ALLOCATION COMPARISON: VERTICAL STACK (Text-based for stability) ===
         st.markdown("#### Interval Allocation Comparison")
-        st.caption("Green = allocation intensity | Gray = 0% | Red/Green in changes = decrease/increase")
+        st.caption("Tables show allocation percentages by interval. Row Sum should be 100%.")
 
-        # Champion Table (full width)
+        # Champion Table (full width, text-based)
         st.markdown("**Champion (Baseline)**")
-        champ_styled = create_optimized_allocation_table(
+        render_allocation_text_table(
             champ['allocations'], selected_grids, grid_acres=champ['acres'],
-            session=session, productivity_factor=productivity_factor,
-            intended_use=intended_use, plan_code=plan_code, coverage_level=coverage_level,
             label="CHAMPION AVERAGE"
         )
-        st.dataframe(champ_styled, use_container_width=True, hide_index=True)
 
-        # Challenger Table (full width)
+        st.markdown("")  # Spacer
+
+        # Challenger Table (full width, text-based)
         st.markdown("**Challenger (Optimized)**")
-        chall_styled = create_optimized_allocation_table(
+        render_allocation_text_table(
             chall['allocations'], selected_grids, grid_acres=chall['acres'],
-            session=session, productivity_factor=productivity_factor,
-            intended_use=intended_use, plan_code=plan_code, coverage_level=coverage_level,
             label="OPTIMIZED AVERAGE"
         )
-        st.dataframe(chall_styled, use_container_width=True, hide_index=True)
 
-        # Change Analysis Table (full width, includes acreage changes)
+        st.markdown("")  # Spacer
+
+        # Change Analysis Table (full width, text-based)
         st.markdown("**Allocation Changes by Grid and Interval**")
-        change_styled = create_change_analysis_table(
+        st.caption("Changes show +/- percentage shifts. Net should be 0%. PORTFOLIO TOTALS shows average shifts and total acres.")
+        render_change_analysis_text_table(
             champ['allocations'], chall['allocations'],
             champ['acres'], chall['acres'],
             selected_grids
         )
-        st.dataframe(change_styled, use_container_width=True, hide_index=True)
 
         # Yearly Comparison Chart
         st.markdown("#### Yearly ROI Comparison")
