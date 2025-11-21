@@ -6,6 +6,7 @@ import time
 import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
+from scipy.optimize import minimize
 
 # === GLOBAL CONSTANT ===
 # The 11 valid PRF intervals
@@ -385,8 +386,378 @@ def generate_incremental_variations(base_allocation_dict):
                     
                     if all(v <= 0.50 for v in var2.values()) and abs(sum(var2.values()) - 1.0) < 0.001:
                         variations.append(var2.copy())
-    
+
     return variations
+
+# =============================================================================
+# === ACRE OPTIMIZATION FUNCTIONS (Two-Stage Optimization) ===
+# =============================================================================
+
+def calculate_yearly_roi_for_grid(
+    session, grid_id, year, allocation, coverage_level,
+    productivity_factor, intended_use, plan_code, acres=1
+):
+    """
+    Calculate ROI for a single grid in a single year.
+    Returns (roi, indemnity, premium) as normalized per-acre values.
+    """
+    try:
+        county_base_value = load_county_base_value(session, grid_id)
+        all_indices_df = load_all_indices(session, grid_id)
+        year_data = all_indices_df[all_indices_df['YEAR'] == year]
+
+        if year_data.empty:
+            return 0, 0, 0
+
+        current_rate_year = get_current_rate_year(session)
+        premium_rates = load_premium_rates(session, grid_id, intended_use, [coverage_level], current_rate_year)[coverage_level]
+        subsidy = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
+
+        dollar_protection = county_base_value * coverage_level * productivity_factor
+        total_protection = dollar_protection * acres
+
+        total_indemnity = 0
+        total_producer_premium = 0
+
+        for interval, pct in allocation.items():
+            if pct == 0:
+                continue
+
+            index_row = year_data[year_data['INTERVAL_NAME'] == interval]
+            index_value = float(index_row['INDEX_VALUE'].iloc[0]) if not index_row.empty else 100
+
+            premium_rate = premium_rates.get(interval, 0)
+            interval_protection = total_protection * pct
+            total_premium = interval_protection * premium_rate
+            producer_premium = total_premium - (total_premium * subsidy)
+
+            trigger = coverage_level * 100
+            shortfall_pct = max(0, (trigger - index_value) / trigger)
+            indemnity = shortfall_pct * interval_protection
+
+            total_indemnity += indemnity
+            total_producer_premium += producer_premium
+
+        roi = (total_indemnity - total_producer_premium) / total_producer_premium if total_producer_premium > 0 else 0
+
+        return roi, total_indemnity, total_producer_premium
+
+    except Exception as e:
+        return 0, 0, 0
+
+
+def calculate_average_interval_weights(grid_results):
+    """
+    Average the best interval allocation across all grids.
+    Returns numpy array of weights for each of the 11 intervals.
+    """
+    all_allocations = []
+    for gid, data in grid_results.items():
+        alloc = data['best_strategy']['allocation']
+        # Convert to array format
+        weights = np.array([alloc.get(interval, 0) for interval in INTERVAL_ORDER_11])
+        all_allocations.append(weights)
+
+    if len(all_allocations) == 0:
+        return np.zeros(11)
+
+    return np.mean(all_allocations, axis=0)
+
+
+def calculate_annual_premium_cost(
+    session, selected_grids, grid_acres, grid_results,
+    productivity_factor, intended_use, plan_code
+):
+    """
+    Calculate total annual premium cost using current rates.
+    Returns: (total_cost, grid_breakdown_dict)
+    """
+    total_cost = 0
+    grid_breakdown = {}
+
+    try:
+        current_rate_year = get_current_rate_year(session)
+
+        for gid in selected_grids:
+            if gid not in grid_results:
+                continue
+
+            acres = grid_acres.get(gid, 0)
+            if acres <= 0:
+                continue
+
+            best_strategy = grid_results[gid]['best_strategy']
+            allocation = best_strategy['allocation']
+            coverage_level = best_strategy['coverage_level']
+
+            county_base_value = load_county_base_value(session, gid)
+            premium_rates = load_premium_rates(session, gid, intended_use, [coverage_level], current_rate_year)[coverage_level]
+            subsidy = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
+
+            dollar_protection = county_base_value * coverage_level * productivity_factor
+            total_protection = dollar_protection * acres
+
+            grid_premium = 0
+            for interval, pct in allocation.items():
+                if pct == 0:
+                    continue
+                premium_rate = premium_rates.get(interval, 0)
+                interval_protection = total_protection * pct
+                total_premium = interval_protection * premium_rate
+                producer_premium = total_premium - (total_premium * subsidy)
+                grid_premium += producer_premium
+
+            grid_breakdown[gid] = grid_premium
+            total_cost += grid_premium
+
+    except Exception as e:
+        pass
+
+    return total_cost, grid_breakdown
+
+
+def apply_budget_constraint(grid_acres, total_cost, budget_limit):
+    """
+    Scale acres proportionally if over budget.
+    Returns: (scaled_grid_acres_dict, scale_factor)
+    """
+    if total_cost <= budget_limit or total_cost == 0:
+        return grid_acres.copy(), 1.0
+
+    scale_factor = budget_limit / total_cost
+    scaled_acres = {gid: acres * scale_factor for gid, acres in grid_acres.items()}
+
+    return scaled_acres, scale_factor
+
+
+def optimize_grid_allocation(
+    base_data_df, grid_results, initial_acres_per_grid,
+    annual_budget, session, productivity_factor, intended_use, plan_code,
+    selected_grids, risk_aversion=1.0
+):
+    """
+    Two-stage optimization with robust error handling:
+    Stage 1: Find maximum total acres within budget (binary search)
+    Stage 2: Optimize distribution for risk-adjusted returns (scipy SLSQP)
+
+    Returns: (optimized_acres_dict, roi_correlation_df)
+    """
+    try:
+        # Build ROI correlation matrix from historical data
+        pivot_df = base_data_df.pivot_table(
+            values='roi',
+            index='year',
+            columns='grid'
+        )
+
+        # Calculate mean ROI and covariance for each grid
+        mean_rois = pivot_df.mean()
+        cov_matrix = pivot_df.cov()
+
+        # Normalize to correlation for display
+        roi_correlation = pivot_df.corr()
+
+        n_grids = len(selected_grids)
+
+        if n_grids == 0:
+            return initial_acres_per_grid.copy(), pd.DataFrame()
+
+        # Calculate cost per acre for each grid
+        cost_per_acre = {}
+        for gid in selected_grids:
+            if gid not in grid_results:
+                continue
+
+            # Calculate cost for 1 acre
+            test_acres = {g: 0 for g in selected_grids}
+            test_acres[gid] = 1
+            cost, _ = calculate_annual_premium_cost(
+                session, [gid], test_acres, grid_results,
+                productivity_factor, intended_use, plan_code
+            )
+            cost_per_acre[gid] = cost
+
+        # Stage 1: Binary search for max total acres within budget
+        total_initial_acres = sum(initial_acres_per_grid.values())
+
+        # Calculate cost at initial allocation
+        initial_cost, _ = calculate_annual_premium_cost(
+            session, selected_grids, initial_acres_per_grid, grid_results,
+            productivity_factor, intended_use, plan_code
+        )
+
+        # Scale to fit budget
+        if initial_cost > annual_budget:
+            scale_factor = annual_budget / initial_cost
+        else:
+            scale_factor = 1.0
+
+        max_total_acres = total_initial_acres * scale_factor
+
+        # Stage 2: Optimize distribution using mean-variance
+        # Objective: Maximize risk-adjusted return = (expected_return - risk_aversion * variance)
+
+        # Convert grid indices to ordered list
+        grid_list = [gid for gid in selected_grids if gid in grid_results and gid in mean_rois.index]
+
+        if len(grid_list) == 0:
+            return initial_acres_per_grid.copy(), roi_correlation
+
+        # Get mean ROIs and covariance submatrix for our grids
+        means = np.array([mean_rois.get(gid, 0) for gid in grid_list])
+
+        # Build covariance matrix
+        n = len(grid_list)
+        cov = np.zeros((n, n))
+        for i, gi in enumerate(grid_list):
+            for j, gj in enumerate(grid_list):
+                if gi in cov_matrix.index and gj in cov_matrix.columns:
+                    cov[i, j] = cov_matrix.loc[gi, gj]
+
+        # Cost per acre array
+        costs = np.array([cost_per_acre.get(gid, 1) for gid in grid_list])
+
+        # Initial guess: proportional allocation
+        initial_weights = np.array([initial_acres_per_grid.get(gid, 0) for gid in grid_list])
+        if initial_weights.sum() > 0:
+            initial_weights = initial_weights / initial_weights.sum()
+        else:
+            initial_weights = np.ones(n) / n
+
+        def neg_utility(weights):
+            """Negative utility function (we minimize, so negate for maximization)"""
+            portfolio_return = np.dot(weights, means)
+            portfolio_variance = np.dot(weights, np.dot(cov, weights))
+            utility = portfolio_return - risk_aversion * portfolio_variance
+            return -utility
+
+        def budget_constraint(weights):
+            """Budget constraint: total cost <= budget"""
+            acres = weights * max_total_acres
+            total_cost = np.dot(acres, costs)
+            return annual_budget - total_cost
+
+        # Constraints
+        constraints = [
+            {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},  # Weights sum to 1
+            {'type': 'ineq', 'fun': budget_constraint}  # Budget constraint
+        ]
+
+        # Bounds: each weight between 0 and 1
+        bounds = [(0.0, 1.0) for _ in range(n)]
+
+        # Optimize
+        result = minimize(
+            neg_utility,
+            initial_weights,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 1000, 'ftol': 1e-9}
+        )
+
+        if result.success:
+            optimal_weights = result.x
+        else:
+            # Fallback to initial proportional allocation
+            optimal_weights = initial_weights
+
+        # Convert weights to acres
+        optimized_acres = {}
+        for i, gid in enumerate(grid_list):
+            optimized_acres[gid] = optimal_weights[i] * max_total_acres
+
+        # Add any grids that weren't in the optimization with 0 acres
+        for gid in selected_grids:
+            if gid not in optimized_acres:
+                optimized_acres[gid] = 0
+
+        return optimized_acres, roi_correlation
+
+    except Exception as e:
+        # Return initial allocation on error
+        return initial_acres_per_grid.copy(), pd.DataFrame()
+
+
+def optimize_without_budget(
+    base_data_df, grid_results, max_total_acres,
+    selected_grids, risk_aversion=1.0
+):
+    """
+    Optimize acre distribution for pure risk-adjusted return without budget constraint.
+    Uses mean-variance optimization (Markowitz).
+
+    Returns: optimized_acres_dict
+    """
+    try:
+        # Build ROI data from historical
+        pivot_df = base_data_df.pivot_table(
+            values='roi',
+            index='year',
+            columns='grid'
+        )
+
+        mean_rois = pivot_df.mean()
+        cov_matrix = pivot_df.cov()
+
+        grid_list = [gid for gid in selected_grids if gid in grid_results and gid in mean_rois.index]
+
+        if len(grid_list) == 0:
+            # Fallback to uniform
+            return {gid: max_total_acres / len(selected_grids) for gid in selected_grids}
+
+        n = len(grid_list)
+        means = np.array([mean_rois.get(gid, 0) for gid in grid_list])
+
+        cov = np.zeros((n, n))
+        for i, gi in enumerate(grid_list):
+            for j, gj in enumerate(grid_list):
+                if gi in cov_matrix.index and gj in cov_matrix.columns:
+                    cov[i, j] = cov_matrix.loc[gi, gj]
+
+        # Initial guess
+        initial_weights = np.ones(n) / n
+
+        def neg_utility(weights):
+            portfolio_return = np.dot(weights, means)
+            portfolio_variance = np.dot(weights, np.dot(cov, weights))
+            utility = portfolio_return - risk_aversion * portfolio_variance
+            return -utility
+
+        constraints = [
+            {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0}
+        ]
+
+        bounds = [(0.0, 1.0) for _ in range(n)]
+
+        result = minimize(
+            neg_utility,
+            initial_weights,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 1000, 'ftol': 1e-9}
+        )
+
+        if result.success:
+            optimal_weights = result.x
+        else:
+            optimal_weights = initial_weights
+
+        optimized_acres = {}
+        for i, gid in enumerate(grid_list):
+            optimized_acres[gid] = optimal_weights[i] * max_total_acres
+
+        for gid in selected_grids:
+            if gid not in optimized_acres:
+                optimized_acres[gid] = 0
+
+        return optimized_acres
+
+    except Exception as e:
+        # Fallback to uniform
+        return {gid: max_total_acres / len(selected_grids) for gid in selected_grids}
+
 
 def render_allocation_inputs(key_prefix):
     """Creates the 11-row data editor for interval allocation."""
@@ -1529,7 +1900,65 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
         col2.caption("Shifts intervals by 1-2 months")
     elif search_depth == 'incremental':
         col2.caption("Small fine-tuning: ±1-5% adjustments")
-    
+
+    # === ACRE ALLOCATION STRATEGY (NEW - Two-Stage Optimization) ===
+    st.divider()
+    st.subheader("Acre Allocation Strategy")
+
+    allocation_mode = st.radio(
+        "How should acres be distributed across grids?",
+        ["Uniform Acres", "Optimized Acres"],
+        help="Uniform: Equal/custom acres per grid. Optimized: Uses correlations for risk-adjusted allocation.",
+        key="s4_allocation_mode"
+    )
+
+    risk_aversion = 1.0  # Default
+    if allocation_mode == "Optimized Acres":
+        st.info("The optimizer calculates which grids generate the highest returns on average and which grids tend to have bad years simultaneously. It then allocates more acres to high-profit grids that don't fail together, reducing the risk of being 'all-in' when drought hits multiple locations at once.")
+
+        risk_aversion = st.slider(
+            "Risk Tolerance",
+            min_value=0.5,
+            max_value=2.0,
+            value=1.0,
+            step=0.1,
+            help="Lower = chase higher returns. Higher = prioritize stability and diversification.",
+            key="s4_risk_aversion"
+        )
+
+    st.divider()
+
+    enable_budget = st.checkbox(
+        "Enable Budget Constraint",
+        value=False,
+        help="Limit total annual premium spending",
+        key="s4_enable_budget"
+    )
+
+    annual_budget = 50000  # Default
+    budget_method = "Optimized Distribution"  # Default
+    if enable_budget:
+        annual_budget = st.number_input(
+            "Maximum Annual Premium Budget ($)",
+            min_value=1000,
+            value=50000,
+            step=1000,
+            help="Maximum producer premium (after subsidy) per year",
+            key="s4_annual_budget"
+        )
+
+        if allocation_mode == "Optimized Acres":
+            budget_method = st.radio(
+                "Budget Optimization Method:",
+                ["Equal Scaling", "Optimized Distribution"],
+                index=1,
+                help="Equal Scaling: Scale all grids proportionally. Optimized Distribution: Redistribute acres to maximize returns within budget.",
+                key="s4_budget_method"
+            )
+        else:
+            st.caption("With Uniform Acres, budget constraint uses Equal Scaling only")
+            budget_method = "Equal Scaling"
+
     st.divider()
 
     if 'tab4_run' not in st.session_state:
@@ -1592,6 +2021,124 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                 st.error("No valid strategies found")
                 return
 
+            # === STAGE 2: Optimize ACRE distribution (NEW - Two-Stage Optimization) ===
+            optimized_grid_acres = grid_acres.copy()
+            roi_correlation_matrix = None
+            stage2_info = None
+
+            if allocation_mode == "Uniform Acres":
+                # Simple equal distribution (EXISTING BEHAVIOR)
+                if use_custom_acres:
+                    # Use custom acres as specified
+                    for gid in selected_grids:
+                        optimized_grid_acres[gid] = st.session_state.get(f"s4_acres_{gid}", total_insured_acres / len(selected_grids))
+                else:
+                    # Use uniform acres
+                    acres_per_grid = total_insured_acres / len(selected_grids)
+                    for gid in selected_grids:
+                        optimized_grid_acres[gid] = acres_per_grid
+
+                # Apply budget constraint if enabled (Equal Scaling only)
+                if enable_budget:
+                    total_cost, _ = calculate_annual_premium_cost(
+                        session, selected_grids, optimized_grid_acres, grid_results,
+                        productivity_factor, intended_use, plan_code
+                    )
+
+                    if total_cost > annual_budget:
+                        optimized_grid_acres, scale_factor = apply_budget_constraint(
+                            optimized_grid_acres, total_cost, annual_budget
+                        )
+                        stage2_info = f"Acres scaled by {scale_factor:.1%} to meet ${annual_budget:,.0f} budget"
+
+            else:  # "Optimized Acres" - NEW FEATURE
+                with st.spinner("Stage 2: Optimizing acre distribution using correlations..."):
+                    # Build historical ROI series for each grid using their best allocation
+                    all_grid_roi_data = []
+
+                    for gid in selected_grids:
+                        if gid not in grid_results:
+                            continue
+
+                        best_alloc = grid_results[gid]['best_strategy']['allocation']
+                        best_cov = grid_results[gid]['best_strategy']['coverage_level']
+
+                        # Calculate yearly ROIs for this grid's optimal strategy
+                        for year in range(start_year, end_year + 1):
+                            roi, indemnity, premium = calculate_yearly_roi_for_grid(
+                                session, gid, year, best_alloc, best_cov,
+                                productivity_factor, intended_use, plan_code,
+                                acres=1  # Normalize to per-acre
+                            )
+
+                            all_grid_roi_data.append({
+                                'grid': gid,
+                                'year': year,
+                                'roi': roi,
+                                'indemnity': indemnity,
+                                'premium': premium
+                            })
+
+                    base_data_df = pd.DataFrame(all_grid_roi_data)
+
+                    # Initial acres guess (uniform or custom)
+                    initial_acres = {}
+                    if use_custom_acres:
+                        for gid in selected_grids:
+                            initial_acres[gid] = st.session_state.get(f"s4_acres_{gid}", total_insured_acres / len(selected_grids))
+                    else:
+                        for gid in selected_grids:
+                            initial_acres[gid] = total_insured_acres / len(selected_grids)
+
+                    if enable_budget and budget_method == "Optimized Distribution":
+                        # Use mean-variance optimizer
+                        optimized_grid_acres, roi_correlation_matrix = optimize_grid_allocation(
+                            base_data_df=base_data_df,
+                            grid_results=grid_results,
+                            initial_acres_per_grid=initial_acres,
+                            annual_budget=annual_budget,
+                            session=session,
+                            productivity_factor=productivity_factor,
+                            intended_use=intended_use,
+                            plan_code=plan_code,
+                            selected_grids=selected_grids,
+                            risk_aversion=risk_aversion
+                        )
+                        stage2_info = "Acre distribution optimized for maximum risk-adjusted returns within budget"
+
+                    elif enable_budget and budget_method == "Equal Scaling":
+                        # Calculate cost with initial acres, then scale
+                        total_cost, _ = calculate_annual_premium_cost(
+                            session, selected_grids, initial_acres, grid_results,
+                            productivity_factor, intended_use, plan_code
+                        )
+
+                        if total_cost > annual_budget:
+                            optimized_grid_acres, scale_factor = apply_budget_constraint(
+                                initial_acres, total_cost, annual_budget
+                            )
+                            stage2_info = f"Acres scaled by {scale_factor:.1%} to meet ${annual_budget:,.0f} budget"
+                        else:
+                            optimized_grid_acres = initial_acres.copy()
+                            stage2_info = "Budget constraint not binding (current cost within budget)"
+
+                    else:
+                        # No budget - optimize for pure risk-adjusted return
+                        max_acres = sum(initial_acres.values())
+                        optimized_grid_acres = optimize_without_budget(
+                            base_data_df=base_data_df,
+                            grid_results=grid_results,
+                            max_total_acres=max_acres,
+                            selected_grids=selected_grids,
+                            risk_aversion=risk_aversion
+                        )
+                        stage2_info = "Acre distribution optimized for maximum risk-adjusted returns"
+
+            # Update grid_results with optimized acres
+            for gid in selected_grids:
+                if gid in grid_results:
+                    grid_results[gid]['acres'] = optimized_grid_acres.get(gid, 0)
+
             st.session_state.tab4_results = {
                 "grid_results": grid_results,
                 "selected_grids": selected_grids,
@@ -1602,7 +2149,14 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                 "multi_grid_mode": multi_grid_mode,
                 "correlation_matrix": correlation_matrix,
                 "search_depth": search_depth,
-                "grid_acres": grid_acres
+                "grid_acres": optimized_grid_acres,
+                "allocation_mode": allocation_mode,
+                "budget_enabled": enable_budget,
+                "annual_budget": annual_budget if enable_budget else None,
+                "budget_method": budget_method if enable_budget else None,
+                "risk_aversion": risk_aversion,
+                "stage2_info": stage2_info,
+                "roi_correlation_matrix": roi_correlation_matrix
             }
             st.session_state.tab1_results = None
             st.session_state.tab2_results = None
@@ -1632,7 +2186,105 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                 st.info("🔧 Marginal Mode: Testing variations of existing allocations")
             elif r.get('search_depth') == 'incremental':
                 st.info("📊 Incremental Mode: Testing percentage adjustments within current allocations")
-            
+
+            # === ACRE ALLOCATION MODE DISPLAY ===
+            if r.get('allocation_mode') == "Optimized Acres":
+                st.success(f"Optimized Acres Mode | Risk Tolerance: {r.get('risk_aversion', 1.0):.1f}")
+                if r.get('stage2_info'):
+                    st.caption(r.get('stage2_info'))
+            elif r.get('budget_enabled') and r.get('stage2_info'):
+                st.info(f"Budget Constraint Active: {r.get('stage2_info')}")
+
+            # === ACRE DISTRIBUTION ANALYSIS (for Optimized Acres mode) ===
+            if r.get('allocation_mode') == "Optimized Acres" and r['multi_grid_mode']:
+                st.divider()
+                st.subheader("Acre Distribution Analysis")
+
+                # Show how acres were allocated
+                acre_data = []
+                total_acres = sum(r['grid_acres'].values())
+                for gid in r['selected_grids']:
+                    if gid in r['grid_results']:
+                        grid_acres_val = r['grid_acres'].get(gid, 0)
+                        acre_data.append({
+                            'Grid': str(gid),
+                            'Optimized Acres': grid_acres_val,
+                            'Percent of Total': (grid_acres_val / total_acres * 100) if total_acres > 0 else 0
+                        })
+
+                acre_df = pd.DataFrame(acre_data)
+
+                # Add totals row
+                total_row = pd.DataFrame([{
+                    'Grid': 'TOTAL',
+                    'Optimized Acres': total_acres,
+                    'Percent of Total': 100.0
+                }])
+                acre_df = pd.concat([acre_df, total_row], ignore_index=True)
+
+                # Format and display
+                st.dataframe(
+                    acre_df.style.format({
+                        'Optimized Acres': '{:,.0f}',
+                        'Percent of Total': '{:.1f}%'
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                # Download button
+                st.download_button(
+                    label="📥 Download Acre Distribution CSV",
+                    data=acre_df.to_csv(index=False),
+                    file_name=f"acre_distribution_{r['start_year']}-{r['end_year']}.csv",
+                    mime="text/csv",
+                    key="acre_dist_csv"
+                )
+
+                # Budget utilization display
+                if r.get('budget_enabled'):
+                    actual_cost, grid_costs = calculate_annual_premium_cost(
+                        session, r['selected_grids'], r['grid_acres'], r['grid_results'],
+                        productivity_factor, intended_use, plan_code
+                    )
+
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Annual Premium Cost", f"${actual_cost:,.0f}")
+                    col2.metric("Budget", f"${r['annual_budget']:,.0f}")
+                    col3.metric("Budget Utilization", f"{(actual_cost / r['annual_budget'] * 100):.1f}%")
+
+                # ROI Correlation Matrix (if available)
+                if r.get('roi_correlation_matrix') is not None and not r['roi_correlation_matrix'].empty:
+                    st.divider()
+                    st.subheader("ROI Correlation Matrix")
+                    st.caption("Correlations based on historical ROI performance (lower = better diversification)")
+
+                    # Format correlation matrix for display
+                    roi_corr = r['roi_correlation_matrix']
+                    corr_csv = roi_corr.to_csv()
+                    st.download_button(
+                        label="📥 Download ROI Correlations CSV",
+                        data=corr_csv,
+                        file_name=f"roi_correlations_{r['start_year']}-{r['end_year']}.csv",
+                        mime="text/csv",
+                        key="roi_corr_csv"
+                    )
+
+                    # Display as text table for alignment
+                    roi_header = "Grid                  " + "".join([f"{str(gid)[:20]:>21}" for gid in roi_corr.columns])
+                    st.text(roi_header)
+                    st.text("─" * len(roi_header))
+
+                    for idx, row in roi_corr.iterrows():
+                        line = f"{str(idx):<20} "
+                        for val in row:
+                            line += f"{val:>21.3f}"
+                        st.text(line)
+
+                    st.text("═" * len(roi_header))
+
+                st.divider()
+
             if r['multi_grid_mode'] and r['correlation_matrix'] is not None:
                 st.subheader("Grid Correlations")
                 
