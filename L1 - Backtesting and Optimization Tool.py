@@ -767,9 +767,12 @@ def calculate_vectorized_roi(weights_batch, index_matrix, premium_rates_array,
     # Calculate protection per interval for each candidate: (n_candidates, 11)
     interval_protection = weights_batch * total_protection
 
-    # Calculate premium per interval: (n_candidates, 11)
-    total_premium = interval_protection * premium_rates_array
-    producer_premium = total_premium * (1 - subsidy)
+    # Calculate premium per interval with proper rounding to match PRF official tool
+    # Round each step IMMEDIATELY: total_premium -> subsidy -> producer_premium
+    # Use numpy floor(x + 0.5) for round half up behavior
+    total_premium = np.floor(interval_protection * premium_rates_array + 0.5)  # Round to dollars
+    premium_subsidy = np.floor(total_premium * subsidy + 0.5)  # Round subsidy
+    producer_premium = total_premium - premium_subsidy  # Already rounded values
 
     # Sum producer premium across intervals for each candidate: (n_candidates,)
     annual_premium = producer_premium.sum(axis=1)
@@ -791,8 +794,9 @@ def calculate_vectorized_roi(weights_batch, index_matrix, premium_rates_array,
     shortfall_expanded = shortfall_pct[np.newaxis, :, :]  # (1, n_years, 11)
     protection_expanded = interval_protection[:, np.newaxis, :]  # (n_candidates, 1, 11)
 
-    # Indemnity: (n_candidates, n_years, 11)
-    indemnity = shortfall_expanded * protection_expanded
+    # Indemnity: (n_candidates, n_years, 11) - round per interval per year
+    indemnity_raw = shortfall_expanded * protection_expanded
+    indemnity = np.floor(indemnity_raw + 0.5)  # Round indemnity to dollars
 
     # Sum across years and intervals: (n_candidates,)
     total_indemnity = indemnity.sum(axis=(1, 2))
@@ -951,12 +955,14 @@ def calculate_yearly_roi_for_grid(
 
             premium_rate = premium_rates.get(interval, 0)
             interval_protection = total_protection * pct
-            total_premium = interval_protection * premium_rate
-            producer_premium = total_premium - (total_premium * subsidy)
+            # Round each step IMMEDIATELY to match PRF official tool behavior
+            total_premium = round_half_up(interval_protection * premium_rate, 0)
+            premium_subsidy = round_half_up(total_premium * subsidy, 0)
+            producer_premium = total_premium - premium_subsidy
 
             trigger = coverage_level * 100
             shortfall_pct = max(0, (trigger - index_value) / trigger)
-            indemnity = shortfall_pct * interval_protection
+            indemnity = round_half_up(shortfall_pct * interval_protection, 0) if shortfall_pct > 0.0001 else 0.0
 
             total_indemnity += indemnity
             total_producer_premium += producer_premium
@@ -1026,8 +1032,10 @@ def calculate_annual_premium_cost(
                     continue
                 premium_rate = premium_rates.get(interval, 0)
                 interval_protection = total_protection * pct
-                total_premium = interval_protection * premium_rate
-                producer_premium = total_premium - (total_premium * subsidy)
+                # Round each step IMMEDIATELY to match PRF official tool behavior
+                total_premium = round_half_up(interval_protection * premium_rate, 0)
+                premium_subsidy = round_half_up(total_premium * subsidy, 0)
+                producer_premium = total_premium - premium_subsidy
                 grid_premium += producer_premium
 
             grid_breakdown[gid] = grid_premium
@@ -1583,8 +1591,9 @@ def render_tab2(session, grid_id, intended_use, productivity_factor, total_insur
                 roi_df['PREMIUM_RATE'] = pd.to_numeric(roi_df['PREMIUM_RATE'], errors='coerce').fillna(0)
                 roi_df['Actual Index Value'] = pd.to_numeric(roi_df['Actual Index Value'], errors='coerce')
                 roi_df['Premium Rate Per $100'] = roi_df['PREMIUM_RATE'] * 100
-                roi_df['Total Premium'] = roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']
-                roi_df['Premium Subsidy'] = roi_df['Total Premium'] * subsidy_percent
+                # Round each step IMMEDIATELY to match PRF official tool behavior
+                roi_df['Total Premium'] = (roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']).apply(lambda x: round_half_up(x, 0))
+                roi_df['Premium Subsidy'] = (roi_df['Total Premium'] * subsidy_percent).apply(lambda x: round_half_up(x, 0))
                 roi_df['Producer Premium'] = roi_df['Total Premium'] - roi_df['Premium Subsidy']
                 trigger_level = coverage_level * 100
                 shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
@@ -1747,12 +1756,14 @@ def run_portfolio_backtest(
 
                     premium_rate = premium_rates_df.get(interval, 0)
                     interval_protection = total_protection * pct
-                    total_premium = interval_protection * premium_rate
-                    producer_premium = total_premium - (total_premium * subsidy_percent)
+                    # Round each step IMMEDIATELY to match PRF official tool behavior
+                    total_premium = round_half_up(interval_protection * premium_rate, 0)
+                    premium_subsidy = round_half_up(total_premium * subsidy_percent, 0)
+                    producer_premium = total_premium - premium_subsidy
 
                     trigger = coverage_level * 100
                     shortfall_pct = max(0, (trigger - index_value) / trigger)
-                    indemnity = shortfall_pct * interval_protection
+                    indemnity = round_half_up(shortfall_pct * interval_protection, 0) if shortfall_pct > 0.0001 else 0.0
 
                     year_indemnity += indemnity
                     year_premium += producer_premium
@@ -3199,14 +3210,15 @@ def render_tab3(session, grid_id, intended_use, productivity_factor, total_insur
                     roi_df = roi_df.join(actuals_df.rename(columns={'INDEX_VALUE': 'Actual Index Value'}))
                     roi_df['PREMIUM_RATE'] = pd.to_numeric(roi_df['PREMIUM_RATE'], errors='coerce').fillna(0)
                     roi_df['Actual Index Value'] = pd.to_numeric(roi_df['Actual Index Value'], errors='coerce').fillna(0)
-                    roi_df['Total Premium'] = roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']
-                    roi_df['Premium Subsidy'] = roi_df['Total Premium'] * subsidy_percent
+                    # Round each step IMMEDIATELY to match PRF official tool behavior
+                    roi_df['Total Premium'] = (roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']).apply(lambda x: round_half_up(x, 0))
+                    roi_df['Premium Subsidy'] = (roi_df['Total Premium'] * subsidy_percent).apply(lambda x: round_half_up(x, 0))
                     roi_df['Producer Premium'] = roi_df['Total Premium'] - roi_df['Premium Subsidy']
                     trigger_level = coverage_level * 100
                     shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
-                    roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                    total_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
-                    total_producer_prem = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
+                    roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: round_half_up(x, 0) if abs(x) >= 0.01 else 0.0)
+                    total_indemnity = roi_df['Estimated Indemnity'].sum()
+                    total_producer_prem = roi_df['Producer Premium'].sum()
                     year_roi = (total_indemnity - total_producer_prem) / total_producer_prem if total_producer_prem > 0 else 0.0
                     
                     year_results.append({
@@ -3519,14 +3531,15 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                             roi_df = roi_df.join(actuals_df.rename(columns={'INDEX_VALUE': 'Actual Index Value'}))
                             roi_df['PREMIUM_RATE'] = pd.to_numeric(roi_df['PREMIUM_RATE'], errors='coerce').fillna(0)
                             roi_df['Actual Index Value'] = pd.to_numeric(roi_df['Actual Index Value'], errors='coerce').fillna(0)
-                            roi_df['Total Premium'] = roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']
-                            roi_df['Premium Subsidy'] = roi_df['Total Premium'] * subsidy_percent
+                            # Round each step IMMEDIATELY to match PRF official tool behavior
+                            roi_df['Total Premium'] = (roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']).apply(lambda x: round_half_up(x, 0))
+                            roi_df['Premium Subsidy'] = (roi_df['Total Premium'] * subsidy_percent).apply(lambda x: round_half_up(x, 0))
                             roi_df['Producer Premium'] = roi_df['Total Premium'] - roi_df['Premium Subsidy']
                             trigger_level = coverage_level * 100
                             shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
-                            roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                            total_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
-                            total_producer_prem = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
+                            roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: round_half_up(x, 0) if abs(x) >= 0.01 else 0.0)
+                            total_indemnity = roi_df['Estimated Indemnity'].sum()
+                            total_producer_prem = roi_df['Producer Premium'].sum()
                             year_roi = (total_indemnity - total_producer_prem) / total_producer_prem if total_producer_prem > 0 else 0.0
 
                             year_results.append({
@@ -3881,15 +3894,17 @@ def run_optimization_s4(
                 index_value = float(index_row['INDEX_VALUE'].iloc[0]) if not index_row.empty else 100
                 premium_rate = premiums.get(interval, 0)
                 interval_protection = total_protection * pct
-                total_premium = interval_protection * premium_rate
-                producer_premium = total_premium - (total_premium * subsidy)
-                
+                # Round each step IMMEDIATELY to match PRF official tool behavior
+                total_premium = round_half_up(interval_protection * premium_rate, 0)
+                premium_subsidy = round_half_up(total_premium * subsidy, 0)
+                producer_premium = total_premium - premium_subsidy
+
                 trigger = coverage_level * 100
                 shortfall_pct = max(0, (trigger - index_value) / trigger)
-                indemnity = shortfall_pct * interval_protection
-                
-                total_indemnity += round_half_up(indemnity, 0)
-                total_producer_premium += round_half_up(producer_premium, 0)
+                indemnity = round_half_up(shortfall_pct * interval_protection, 0) if shortfall_pct > 0.0001 else 0.0
+
+                total_indemnity += indemnity
+                total_producer_premium += producer_premium
                 
             year_roi = (total_indemnity - total_producer_premium) / total_producer_premium if total_producer_premium > 0 else 0
             year_rois.append(year_roi)
@@ -4661,22 +4676,23 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                 roi_df = roi_df.join(actuals_df.rename(columns={'INDEX_VALUE': 'Actual Index Value'}))
                                 roi_df['PREMIUM_RATE'] = pd.to_numeric(roi_df['PREMIUM_RATE'], errors='coerce').fillna(0)
                                 roi_df['Actual Index Value'] = pd.to_numeric(roi_df['Actual Index Value'], errors='coerce').fillna(0)
-                                roi_df['Total Premium'] = roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']
-                                roi_df['Premium Subsidy'] = roi_df['Total Premium'] * subsidy_percent
+                                # Round each step IMMEDIATELY to match PRF official tool behavior
+                                roi_df['Total Premium'] = (roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']).apply(lambda x: round_half_up(x, 0))
+                                roi_df['Premium Subsidy'] = (roi_df['Total Premium'] * subsidy_percent).apply(lambda x: round_half_up(x, 0))
                                 roi_df['Producer Premium'] = roi_df['Total Premium'] - roi_df['Premium Subsidy']
                                 trigger_level = coverage_level * 100
                                 shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
-                                roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                                
-                                year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
-                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
-                                
+                                roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: round_half_up(x, 0) if abs(x) >= 0.01 else 0.0)
+
+                                year_premium = roi_df['Producer Premium'].sum()
+                                year_indemnity = roi_df['Estimated Indemnity'].sum()
+
                                 grid_total_premium += year_premium
                                 grid_total_indemnity += year_indemnity
-                                
+
                                 year_roi = (year_indemnity - year_premium) / year_premium if year_premium > 0 else 0
                                 grid_year_rois.append(year_roi)
-                            
+
                             grid_annual_premium = grid_total_premium / num_years
                             grid_annual_indemnity = grid_total_indemnity / num_years
                             grid_annual_net = grid_annual_indemnity - grid_annual_premium
@@ -4751,22 +4767,23 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                     roi_df = roi_df.join(actuals_df.rename(columns={'INDEX_VALUE': 'Actual Index Value'}))
                                     roi_df['PREMIUM_RATE'] = pd.to_numeric(roi_df['PREMIUM_RATE'], errors='coerce').fillna(0)
                                     roi_df['Actual Index Value'] = pd.to_numeric(roi_df['Actual Index Value'], errors='coerce').fillna(0)
-                                    roi_df['Total Premium'] = roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']
-                                    roi_df['Premium Subsidy'] = roi_df['Total Premium'] * subsidy_percent
+                                    # Round each step IMMEDIATELY to match PRF official tool behavior
+                                    roi_df['Total Premium'] = (roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']).apply(lambda x: round_half_up(x, 0))
+                                    roi_df['Premium Subsidy'] = (roi_df['Total Premium'] * subsidy_percent).apply(lambda x: round_half_up(x, 0))
                                     roi_df['Producer Premium'] = roi_df['Total Premium'] - roi_df['Premium Subsidy']
                                     trigger_level = coverage_level * 100
                                     shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
-                                    roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                                    
-                                    year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
-                                    year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
-                                    
+                                    roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: round_half_up(x, 0) if abs(x) >= 0.01 else 0.0)
+
+                                    year_premium = roi_df['Producer Premium'].sum()
+                                    year_indemnity = roi_df['Estimated Indemnity'].sum()
+
                                     grid_total_premium += year_premium
                                     grid_total_indemnity += year_indemnity
-                                    
+
                                     year_roi = (year_indemnity - year_premium) / year_premium if year_premium > 0 else 0
                                     grid_year_rois.append(year_roi)
-                                
+
                                 grid_cumulative_net = grid_total_indemnity - grid_total_premium
                                 
                                 # Calculate risk-adjusted return
@@ -4883,22 +4900,23 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                 roi_df = roi_df.join(actuals_df.rename(columns={'INDEX_VALUE': 'Actual Index Value'}))
                                 roi_df['PREMIUM_RATE'] = pd.to_numeric(roi_df['PREMIUM_RATE'], errors='coerce').fillna(0)
                                 roi_df['Actual Index Value'] = pd.to_numeric(roi_df['Actual Index Value'], errors='coerce').fillna(0)
-                                roi_df['Total Premium'] = roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']
-                                roi_df['Premium Subsidy'] = roi_df['Total Premium'] * subsidy_percent
+                                # Round each step IMMEDIATELY to match PRF official tool behavior
+                                roi_df['Total Premium'] = (roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']).apply(lambda x: round_half_up(x, 0))
+                                roi_df['Premium Subsidy'] = (roi_df['Total Premium'] * subsidy_percent).apply(lambda x: round_half_up(x, 0))
                                 roi_df['Producer Premium'] = roi_df['Total Premium'] - roi_df['Premium Subsidy']
                                 trigger_level = coverage_level * 100
                                 shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
-                                roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                                
-                                year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
-                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
-                                
+                                roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: round_half_up(x, 0) if abs(x) >= 0.01 else 0.0)
+
+                                year_premium = roi_df['Producer Premium'].sum()
+                                year_indemnity = roi_df['Estimated Indemnity'].sum()
+
                                 curr_grid_premium += year_premium
                                 curr_grid_indemnity += year_indemnity
-                                
+
                                 year_roi = (year_indemnity - year_premium) / year_premium if year_premium > 0 else 0
                                 curr_grid_rois.append(year_roi)
-                            
+
                             current_total_premium += curr_grid_premium
                             current_total_indemnity += curr_grid_indemnity
                             current_year_rois.extend(curr_grid_rois)
@@ -4920,22 +4938,23 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
                                 roi_df = roi_df.join(actuals_df.rename(columns={'INDEX_VALUE': 'Actual Index Value'}))
                                 roi_df['PREMIUM_RATE'] = pd.to_numeric(roi_df['PREMIUM_RATE'], errors='coerce').fillna(0)
                                 roi_df['Actual Index Value'] = pd.to_numeric(roi_df['Actual Index Value'], errors='coerce').fillna(0)
-                                roi_df['Total Premium'] = roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']
-                                roi_df['Premium Subsidy'] = roi_df['Total Premium'] * subsidy_percent
+                                # Round each step IMMEDIATELY to match PRF official tool behavior
+                                roi_df['Total Premium'] = (roi_df['Policy Protection Per Unit'] * roi_df['PREMIUM_RATE']).apply(lambda x: round_half_up(x, 0))
+                                roi_df['Premium Subsidy'] = (roi_df['Total Premium'] * subsidy_percent).apply(lambda x: round_half_up(x, 0))
                                 roi_df['Producer Premium'] = roi_df['Total Premium'] - roi_df['Premium Subsidy']
                                 trigger_level = coverage_level * 100
                                 shortfall_pct = (trigger_level - roi_df['Actual Index Value']) / trigger_level
-                                roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: 0.0 if abs(x) < 0.01 else x)
-                                
-                                year_premium = roi_df['Producer Premium'].apply(lambda x: round_half_up(x, 0)).sum()
-                                year_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round_half_up(x, 0)).sum()
-                                
+                                roi_df['Estimated Indemnity'] = (shortfall_pct * roi_df['Policy Protection Per Unit']).clip(lower=0).apply(lambda x: round_half_up(x, 0) if abs(x) >= 0.01 else 0.0)
+
+                                year_premium = roi_df['Producer Premium'].sum()
+                                year_indemnity = roi_df['Estimated Indemnity'].sum()
+
                                 sugg_grid_premium += year_premium
                                 sugg_grid_indemnity += year_indemnity
-                                
+
                                 year_roi = (year_indemnity - year_premium) / year_premium if year_premium > 0 else 0
                                 sugg_grid_rois.append(year_roi)
-                            
+
                             suggested_total_premium += sugg_grid_premium
                             suggested_total_indemnity += sugg_grid_indemnity
                             suggested_year_rois.extend(sugg_grid_rois)
