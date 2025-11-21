@@ -1047,14 +1047,26 @@ def calculate_annual_premium_cost(
     return total_cost, grid_breakdown
 
 
-def apply_budget_constraint(grid_acres, total_cost, budget_limit, allow_scale_up=False):
+def apply_budget_constraint(grid_acres, total_cost, budget_limit, session, selected_grids,
+                           grid_results, productivity_factor, intended_use, plan_code,
+                           allow_scale_up=False):
     """
-    Scale acres proportionally to fit budget.
+    Scale acres proportionally to fit budget with iterative adjustment.
+
+    After initial proportional scaling, recalculates actual premium and adjusts
+    acres iteratively until the premium fits within budget bounds. This handles
+    rounding effects in the multi-step premium calculation.
 
     Args:
         grid_acres: Dict of {grid_id: acres}
-        total_cost: Current total premium cost
+        total_cost: Current total premium cost (initial estimate)
         budget_limit: Maximum budget allowed
+        session: Snowflake session for database queries
+        selected_grids: List of grid IDs
+        grid_results: Dict with best_strategy for each grid
+        productivity_factor: Productivity factor for protection calculation
+        intended_use: Intended use code
+        plan_code: Plan code for subsidy lookup
         allow_scale_up: If True, scale up acres when under budget to utilize full budget
 
     Returns: (scaled_grid_acres_dict, scale_factor)
@@ -1062,15 +1074,70 @@ def apply_budget_constraint(grid_acres, total_cost, budget_limit, allow_scale_up
     if total_cost == 0:
         return grid_acres.copy(), 1.0
 
+    # Apply 0.5% safety margin to prevent edge cases
+    SAFETY_MARGIN = 0.995
+    effective_budget = budget_limit * SAFETY_MARGIN
+    MAX_ITERATIONS = 20
+    ADJUSTMENT_STEP = 0.001  # 0.1% adjustment per iteration
+
     if total_cost > budget_limit:
         # Over budget - scale DOWN
-        scale_factor = budget_limit / total_cost
+        scale_factor = effective_budget / total_cost
         scaled_acres = {gid: acres * scale_factor for gid, acres in grid_acres.items()}
+
+        # Iteratively adjust until actual premium fits within budget
+        for iteration in range(MAX_ITERATIONS):
+            actual_cost, _ = calculate_annual_premium_cost(
+                session, selected_grids, scaled_acres, grid_results,
+                productivity_factor, intended_use, plan_code
+            )
+
+            if actual_cost <= budget_limit:
+                # Success - within budget
+                break
+            else:
+                # Still over budget due to rounding - reduce acres by 0.1%
+                adjustment = 1.0 - ADJUSTMENT_STEP
+                scaled_acres = {gid: acres * adjustment for gid, acres in scaled_acres.items()}
+                scale_factor *= adjustment
+
         return scaled_acres, scale_factor
+
     elif allow_scale_up and total_cost < budget_limit:
         # Under budget and scale-up enabled - scale UP to fill budget
-        scale_factor = budget_limit / total_cost
+        scale_factor = effective_budget / total_cost
         scaled_acres = {gid: acres * scale_factor for gid, acres in grid_acres.items()}
+
+        # Iteratively adjust to maximize budget utilization without exceeding
+        for iteration in range(MAX_ITERATIONS):
+            actual_cost, _ = calculate_annual_premium_cost(
+                session, selected_grids, scaled_acres, grid_results,
+                productivity_factor, intended_use, plan_code
+            )
+
+            if actual_cost > budget_limit:
+                # Went over budget - reduce acres by 0.1%
+                adjustment = 1.0 - ADJUSTMENT_STEP
+                scaled_acres = {gid: acres * adjustment for gid, acres in scaled_acres.items()}
+                scale_factor *= adjustment
+            elif actual_cost < budget_limit * 0.99:
+                # Still significantly under budget - try to increase
+                adjustment = 1.0 + ADJUSTMENT_STEP
+                test_acres = {gid: acres * adjustment for gid, acres in scaled_acres.items()}
+                test_cost, _ = calculate_annual_premium_cost(
+                    session, selected_grids, test_acres, grid_results,
+                    productivity_factor, intended_use, plan_code
+                )
+                if test_cost <= budget_limit:
+                    scaled_acres = test_acres
+                    scale_factor *= adjustment
+                else:
+                    # Can't increase further without going over
+                    break
+            else:
+                # Within acceptable range (99-100% of budget)
+                break
+
         return scaled_acres, scale_factor
     else:
         # Within budget (or under budget but scale-up disabled)
@@ -3027,7 +3094,10 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
 
                     # Apply proportional scaling (with optional scale-up)
                     challenger_acres, scale_factor = apply_budget_constraint(
-                        initial_challenger_acres, total_cost, annual_budget, allow_scale_up=allow_scale_up
+                        initial_challenger_acres, total_cost, annual_budget,
+                        session, challenger_grids, grid_results_for_cost,
+                        productivity_factor, intended_use, plan_code,
+                        allow_scale_up=allow_scale_up
                     )
 
                     if scale_factor < 1.0:
@@ -4275,7 +4345,9 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
 
                     if total_cost > annual_budget:
                         optimized_grid_acres, scale_factor = apply_budget_constraint(
-                            optimized_grid_acres, total_cost, annual_budget
+                            optimized_grid_acres, total_cost, annual_budget,
+                            session, selected_grids, grid_results,
+                            productivity_factor, intended_use, plan_code
                         )
                         stage2_info = f"Acres scaled by {scale_factor:.1%} to meet ${annual_budget:,.0f} budget"
 
@@ -4344,7 +4416,9 @@ def render_tab4(session, grid_id, intended_use, productivity_factor, total_insur
 
                         if total_cost > annual_budget:
                             optimized_grid_acres, scale_factor = apply_budget_constraint(
-                                initial_acres, total_cost, annual_budget
+                                initial_acres, total_cost, annual_budget,
+                                session, selected_grids, grid_results,
+                                productivity_factor, intended_use, plan_code
                             )
                             stage2_info = f"Acres scaled by {scale_factor:.1%} to meet ${annual_budget:,.0f} budget"
                         else:
