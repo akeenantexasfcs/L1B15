@@ -1663,6 +1663,8 @@ def run_portfolio_backtest(
         risk_adj_return = cumulative_roi / std_roi if std_roi > 0 else 0
         profitable_years = (portfolio_df['Net Return'] > 0).sum()
         profitable_pct = profitable_years / len(portfolio_df) if len(portfolio_df) > 0 else 0
+        years_tested = len(portfolio_df)
+        avg_annual_premium = total_premium / years_tested if years_tested > 0 else 0
 
         metrics = {
             'cumulative_roi': cumulative_roi,
@@ -1673,7 +1675,8 @@ def run_portfolio_backtest(
             'total_premium': total_premium,
             'total_profit': total_indemnity - total_premium,
             'profitable_pct': profitable_pct,
-            'years_tested': len(portfolio_df)
+            'years_tested': years_tested,
+            'avg_annual_premium': avg_annual_premium
         }
     else:
         metrics = {}
@@ -2197,27 +2200,24 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         st.markdown("#### Performance Comparison")
 
         comparison_data = {
-            'Metric': ['Cumulative ROI', 'Risk-Adjusted Return', 'Total Profit', 'Win Rate', 'Avg Annual ROI'],
+            'Metric': ['Cumulative ROI', 'Risk-Adjusted Return', 'Estimated Avg. Annual Premium', 'Win Rate'],
             'Champion': [
                 f"{champ_metrics.get('cumulative_roi', 0):.1%}",
                 f"{champ_metrics.get('risk_adj_return', 0):.2f}",
-                f"${champ_metrics.get('total_profit', 0):,.0f}",
-                f"{champ_metrics.get('profitable_pct', 0):.0%}",
-                f"{champ_metrics.get('avg_roi', 0):.1%}"
+                f"${champ_metrics.get('avg_annual_premium', 0):,.0f}",
+                f"{champ_metrics.get('profitable_pct', 0):.0%}"
             ],
             'Challenger': [
                 f"{chall_metrics.get('cumulative_roi', 0):.1%}",
                 f"{chall_metrics.get('risk_adj_return', 0):.2f}",
-                f"${chall_metrics.get('total_profit', 0):,.0f}",
-                f"{chall_metrics.get('profitable_pct', 0):.0%}",
-                f"{chall_metrics.get('avg_roi', 0):.1%}"
+                f"${chall_metrics.get('avg_annual_premium', 0):,.0f}",
+                f"{chall_metrics.get('profitable_pct', 0):.0%}"
             ],
             'Difference': [
                 f"{(chall_metrics.get('cumulative_roi', 0) - champ_metrics.get('cumulative_roi', 0)):.1%}",
                 f"{(chall_metrics.get('risk_adj_return', 0) - champ_metrics.get('risk_adj_return', 0)):.2f}",
-                f"${(chall_metrics.get('total_profit', 0) - champ_metrics.get('total_profit', 0)):,.0f}",
-                f"{(chall_metrics.get('profitable_pct', 0) - champ_metrics.get('profitable_pct', 0)):.0%}",
-                f"{(chall_metrics.get('avg_roi', 0) - champ_metrics.get('avg_roi', 0)):.1%}"
+                f"${(chall_metrics.get('avg_annual_premium', 0) - champ_metrics.get('avg_annual_premium', 0)):,.0f}",
+                f"{(chall_metrics.get('profitable_pct', 0) - champ_metrics.get('profitable_pct', 0)):.0%}"
             ]
         }
 
