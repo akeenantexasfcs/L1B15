@@ -2930,52 +2930,7 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
 
     st.divider()
 
-    # === OPTIMIZATION CONTROLS SECTION ===
-    st.subheader("Optimization Controls")
-
-    use_optimization = st.checkbox(
-        "Enable Allocation Optimization",
-        value=False,
-        help="Automatically find optimal interval allocations for each grid",
-        key="tab5_use_optimization"
-    )
-
-    use_marginal_search = False
-    search_iterations = 3000  # Default to Standard
-    search_mode = 'global'
-
-    if use_optimization:
-        use_marginal_search = st.checkbox(
-            "Use Marginal Search (Perturb Naive Allocation)",
-            value=False,
-            help="Start from naive allocation and perturb by shifting 5% between intervals. Best for fine-tuning.",
-            key="tab5_use_marginal"
-        )
-
-        if use_marginal_search:
-            search_mode = 'marginal'
-            search_iterations = 1000  # Marginal search uses fewer iterations but more targeted
-            st.info("Marginal search perturbs a naive equal distribution by shifting 5% between intervals or to neighbors.")
-        else:
-            search_mode = 'global'
-            iteration_map = {
-                'Fast': 500,
-                'Standard': 3000,
-                'Thorough': 7000,
-                'Maximum': 15000
-            }
-            search_depth_key = st.select_slider(
-                "Search Depth",
-                options=list(iteration_map.keys()),
-                value='Standard',
-                help="More iterations = better results but slower",
-                key="tab5_search_depth"
-            )
-            search_iterations = iteration_map[search_depth_key]
-            st.caption(f"{search_iterations:,} iterations (Global Search)")
-
-    st.divider()
-
+    # === RUN BACKTEST SECTION ===
     if 'tab5_run' not in st.session_state:
         st.session_state.tab5_run = False
 
@@ -2984,56 +2939,6 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
         try:
             grid_results = {}
             years_used = []
-
-            # === RUN OPTIMIZATION IF ENABLED ===
-            optimized_allocations = {}
-            optimization_stats = {}
-
-            if use_optimization:
-                opt_progress = st.progress(0, text="Optimizing allocations...")
-                for idx, gid in enumerate(selected_grids):
-                    opt_progress.progress(
-                        (idx + 1) / len(selected_grids),
-                        text=f"Optimizing {gid} ({idx + 1}/{len(selected_grids)}) - {search_mode} search..."
-                    )
-                    try:
-                        # Use cached run_fast_optimization_core with iterations and search_mode
-                        best_alloc, best_roi, tested = run_fast_optimization_core(
-                            session, gid, start_year, end_year, plan_code,
-                            productivity_factor, grid_acres[gid], intended_use,
-                            coverage_level, search_iterations, search_mode
-                        )
-                        if best_alloc:
-                            optimized_allocations[gid] = best_alloc
-                            optimization_stats[gid] = {
-                                'roi': best_roi,
-                                'tested': tested,
-                                'mode': search_mode
-                            }
-                    except Exception as e:
-                        st.warning(f"Optimization failed for {gid}: {str(e)}")
-                        optimized_allocations[gid] = grid_allocations[gid]
-
-                opt_progress.empty()
-
-                # Show optimization results
-                if optimized_allocations:
-                    with st.expander("Optimization Results", expanded=True):
-                        mode_label = "Marginal" if search_mode == 'marginal' else "Global"
-                        st.caption(f"Search Mode: {mode_label} | Iterations: {search_iterations:,}")
-                        for gid in selected_grids:
-                            if gid in optimized_allocations:
-                                alloc = optimized_allocations[gid]
-                                alloc_str = ", ".join([f"{k}: {int(v*100)}%" for k, v in sorted(alloc.items()) if v > 0])
-                                stats = optimization_stats.get(gid, {})
-                                roi_str = f"{stats.get('roi', 0):.1%}" if stats else "N/A"
-                                tested_str = f"{stats.get('tested', 0):,}" if stats else "N/A"
-                                st.markdown(f"**{gid}**: {alloc_str} (ROI: {roi_str}, tested {tested_str} strategies)")
-
-                # Use optimized allocations for backtest
-                for gid in selected_grids:
-                    if gid in optimized_allocations:
-                        grid_allocations[gid] = optimized_allocations[gid]
 
             with st.spinner(f"Running backtest for {len(selected_grids)} grids..."):
                 for gid in selected_grids:
