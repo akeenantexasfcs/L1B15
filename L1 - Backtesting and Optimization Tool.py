@@ -1754,6 +1754,55 @@ def generate_base_data_for_mvo(session, selected_grids, grid_results_with_alloca
     return pd.DataFrame(rows)
 
 
+def create_optimized_allocation_table(allocations_dict, grid_list, title="Allocation"):
+    """
+    Create a styled allocation table for Champion or Challenger.
+
+    Args:
+        allocations_dict: Dict mapping grid_id -> {interval: weight, ...}
+        grid_list: List of grid IDs to include
+        title: Title prefix for columns
+
+    Returns:
+        Styled pandas DataFrame ready for display
+    """
+    # Build rows for each grid
+    rows = []
+    for gid in grid_list:
+        alloc = allocations_dict.get(gid, {})
+        row = {'Grid': gid}
+        for interval in range(1, 12):  # Intervals 1-11
+            key = f"interval_{interval}"
+            pct = alloc.get(key, 0)
+            if isinstance(pct, (int, float)):
+                row[f"Int {interval}"] = int(pct * 100) if pct > 0 else 0
+            else:
+                row[f"Int {interval}"] = 0
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    # Style function to highlight non-zero allocations
+    def highlight_allocations(val):
+        if isinstance(val, (int, float)) and val > 0:
+            if val >= 40:
+                return 'background-color: #2e7d32; color: white'  # Dark green
+            elif val >= 25:
+                return 'background-color: #4caf50; color: white'  # Medium green
+            elif val >= 10:
+                return 'background-color: #81c784'  # Light green
+        return ''
+
+    # Apply styling to interval columns only
+    interval_cols = [f"Int {i}" for i in range(1, 12)]
+    styled = df.style.applymap(
+        highlight_allocations,
+        subset=[c for c in interval_cols if c in df.columns]
+    ).format({col: '{:.0f}%' for col in interval_cols if col in df.columns})
+
+    return styled
+
+
 def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code):
     """
     Unified Portfolio Strategy tab implementing Champion vs Challenger workflow.
@@ -2264,24 +2313,25 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         else:
             st.info("**TIE!** Both strategies performed equally.")
 
-        # Side-by-Side Allocation View
+        # Side-by-Side Allocation View with Styled Tables
         st.markdown("#### Interval Allocation Comparison")
+        st.caption("Green shading indicates allocation intensity (darker = higher %)")
 
         col1, col2 = st.columns(2)
 
         with col1:
             st.markdown("**Champion Allocations**")
-            for gid in selected_grids:
-                alloc = champ['allocations'].get(gid, {})
-                alloc_str = ", ".join([f"{k}: {int(v*100)}%" for k, v in sorted(alloc.items()) if v > 0])
-                st.text(f"{gid}: {alloc_str}")
+            champ_styled = create_optimized_allocation_table(
+                champ['allocations'], selected_grids, title="Champion"
+            )
+            st.dataframe(champ_styled, use_container_width=True, hide_index=True)
 
         with col2:
             st.markdown("**Challenger Allocations**")
-            for gid in selected_grids:
-                alloc = chall['allocations'].get(gid, {})
-                alloc_str = ", ".join([f"{k}: {int(v*100)}%" for k, v in sorted(alloc.items()) if v > 0])
-                st.text(f"{gid}: {alloc_str}")
+            chall_styled = create_optimized_allocation_table(
+                chall['allocations'], selected_grids, title="Challenger"
+            )
+            st.dataframe(chall_styled, use_container_width=True, hide_index=True)
 
         # Acreage Change Table
         st.markdown("#### Acreage Distribution Changes")
