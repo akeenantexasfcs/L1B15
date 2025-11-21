@@ -2521,61 +2521,80 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     # BOTTOM SECTION: THE CHALLENGER (OPTIMIZER)
     # ==========================================================================
     st.markdown("### The Challenger (AI Optimizer)")
-    st.caption("Configure the AI optimizer to find a better strategy.")
+    st.caption("Build on your Champion strategy by adding incremental grids.")
 
     # --------------------------------------------------------------------------
-    # Challenger Grid Selection (independent from Champion)
+    # Challenger Portfolio Structure: Base (Champion) + Incremental Grids
     # --------------------------------------------------------------------------
-    st.markdown("**Challenger Portfolio Structure:**")
+    st.markdown("**Incremental Portfolio Expansion:**")
 
-    # Default challenger grids to match Global Settings grids
-    default_challenger_grids = st.session_state.get('ps_challenger_grids', selected_grids)
-    default_challenger_grids = [g for g in default_challenger_grids if g in all_grids]
-    if not default_challenger_grids:
-        default_challenger_grids = selected_grids
+    # Show current base (Champion grids)
+    st.caption(f"Base Portfolio: {len(selected_grids)} grid(s) inherited from Champion")
 
-    challenger_grids = st.multiselect(
-        "Select Grids for Challenger Portfolio",
-        options=all_grids,
-        default=default_challenger_grids,
-        max_selections=20,
-        help="Challenger can use a different grid mix than Champion. Defaults to Global Settings grids.",
-        key="ps_challenger_grids"
+    # Incremental grids: all_grids EXCLUDING the Champion's selected_grids
+    available_incremental_grids = [g for g in all_grids if g not in selected_grids]
+
+    # Get default incremental grids from session state
+    default_incremental = st.session_state.get('ps_incremental_grids', [])
+    default_incremental = [g for g in default_incremental if g in available_incremental_grids]
+
+    incremental_grids = st.multiselect(
+        "Add Incremental Grids to Challenger",
+        options=available_incremental_grids,
+        default=default_incremental,
+        max_selections=12,
+        help="Select additional grids to expand beyond the Champion's base portfolio. The optimizer will find the best allocations for all grids.",
+        key="ps_incremental_grids"
     )
+
+    # Combine: Champion base + Incremental = Challenger portfolio
+    challenger_grids = list(selected_grids) + list(incremental_grids)
 
     if not challenger_grids:
-        st.warning("Select at least one grid for the Challenger portfolio.")
+        st.warning("No grids available for Challenger portfolio.")
         return
 
-    # --------------------------------------------------------------------------
-    # Challenger Acreage (parsimonious default with optional override)
-    # --------------------------------------------------------------------------
-    # Default: equal distribution of total_insured_acres
-    default_acres_per_grid = total_insured_acres / len(challenger_grids)
+    # Display summary
+    if incremental_grids:
+        st.success(f"Challenger Portfolio: {len(selected_grids)} base + {len(incremental_grids)} incremental = {len(challenger_grids)} total grids")
+    else:
+        st.info("No incremental grids selected. Challenger will optimize the same grids as Champion.")
 
-    override_challenger_acres = st.checkbox(
-        "Override Challenger Acres",
-        value=False,
-        help="Manually set acres for each Challenger grid. Otherwise, total insured acres are distributed equally.",
-        key="ps_override_challenger_acres"
-    )
-
+    # --------------------------------------------------------------------------
+    # Challenger Acreage: Inherit Base + Manual Incremental
+    # --------------------------------------------------------------------------
+    # Start with Champion acres for base grids
     challenger_acres = {}
-    if override_challenger_acres:
-        acre_cols = st.columns(min(4, len(challenger_grids)))
-        for idx, gid in enumerate(challenger_grids):
+    for gid in selected_grids:
+        challenger_acres[gid] = champion_acres.get(gid, total_insured_acres / len(selected_grids))
+
+    # Render manual inputs ONLY for incremental grids
+    if incremental_grids:
+        st.markdown("**Incremental Grid Acreage:**")
+        st.caption("Set acres for each new grid being added to the Challenger portfolio.")
+
+        default_incremental_acres = total_insured_acres / len(selected_grids)  # Use avg of base as default
+        acre_cols = st.columns(min(4, len(incremental_grids)))
+
+        for idx, gid in enumerate(incremental_grids):
             with acre_cols[idx % 4]:
                 challenger_acres[gid] = st.number_input(
                     f"{gid}",
                     min_value=1,
-                    value=int(default_acres_per_grid),
+                    value=int(default_incremental_acres),
                     step=10,
-                    key=f"ps_chall_acres_{gid}"
+                    key=f"ps_incr_acres_{gid}"
                 )
+
+    # Show summary of all acres
+    total_challenger_acres = sum(challenger_acres.values())
+    base_acres = sum(champion_acres.get(g, 0) for g in selected_grids)
+    incremental_acres_total = total_challenger_acres - base_acres
+
+    if incremental_grids:
+        st.caption(f"Total Challenger Acres: {total_challenger_acres:,.0f} ({base_acres:,.0f} base + {incremental_acres_total:,.0f} incremental)")
     else:
-        for gid in challenger_grids:
-            challenger_acres[gid] = default_acres_per_grid
-        st.caption(f"Challenger acres: {default_acres_per_grid:,.0f} acres per grid ({total_insured_acres:,.0f} total ÷ {len(challenger_grids)} grids)")
+        st.caption(f"Challenger inherits Champion acres: {total_challenger_acres:,.0f} total")
 
     st.markdown("---")
 
