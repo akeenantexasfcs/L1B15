@@ -762,25 +762,25 @@ def optimize_without_budget(
 def render_allocation_inputs(key_prefix):
     """Creates the 11-row data editor for interval allocation."""
     st.subheader("Interval Allocation")
-    
+
     # Check if there's preset allocation data for this key_prefix
     preset_key = f"{key_prefix}_preset_allocation"
     if preset_key in st.session_state:
         preset_alloc = st.session_state[preset_key]
-        # Convert from decimal to percentage format
-        alloc_data = {interval: preset_alloc.get(interval, 0.0) * 100 for interval in INTERVAL_ORDER_11}
+        # Convert from decimal to percentage format - round to whole numbers
+        alloc_data = {interval: round(preset_alloc.get(interval, 0.0) * 100) for interval in INTERVAL_ORDER_11}
     else:
         # Default allocation
         alloc_data = {
-            'Jan-Feb': 50.0, 'Feb-Mar': 0.0, 'Mar-Apr': 50.0, 'Apr-May': 0.0,
-            'May-Jun': 0.0, 'Jun-Jul': 0.0, 'Jul-Aug': 0.0, 'Aug-Sep': 0.0,
-            'Sep-Oct': 0.0, 'Oct-Nov': 0.0, 'Nov-Dec': 0.0
+            'Jan-Feb': 50, 'Feb-Mar': 0, 'Mar-Apr': 50, 'Apr-May': 0,
+            'May-Jun': 0, 'Jun-Jul': 0, 'Jul-Aug': 0, 'Aug-Sep': 0,
+            'Sep-Oct': 0, 'Oct-Nov': 0, 'Nov-Dec': 0
         }
-    
+
     df_alloc = pd.DataFrame(list(alloc_data.items()), columns=['Interval', 'Percent of Value'])
-    
-    st.caption("Max 50% per interval, 100% total, no adjacent intervals (excl. Nov-Dec/Jan-Feb).")
-    
+
+    st.caption("Whole numbers only (1% increments). Each interval: 0% OR 10-50%. Total must equal 100%. No adjacent intervals (except Nov-Dec/Jan-Feb wrap).")
+
     edited_df = st.data_editor(
         df_alloc,
         key=f"{key_prefix}_alloc_editor",
@@ -788,36 +788,54 @@ def render_allocation_inputs(key_prefix):
         use_container_width=True,
         column_config={
             "Interval": st.column_config.TextColumn("Interval", disabled=True, width="medium"),
-            "Percent of Value": st.column_config.NumberColumn("Percent of Value (%)", min_value=0, max_value=50, step=1.0, format="%.2f%%")
+            "Percent of Value": st.column_config.NumberColumn("Percent of Value (%)", min_value=0, max_value=50, step=1, format="%d%%")
         }
     )
-    
+
     # --- Validation ---
     alloc_dict = pd.Series(edited_df['Percent of Value'].values, index=edited_df['Interval']).to_dict()
+
+    # Round to integers to ensure whole numbers
+    alloc_dict = {k: round(v) for k, v in alloc_dict.items()}
+
     total_pct = sum(alloc_dict.values())
     max_pct = max(alloc_dict.values())
-    
+
     is_valid = True
-    
-    if abs(total_pct - 100.0) > 0.01:
+
+    # Check for whole numbers
+    for interval, pct in alloc_dict.items():
+        if pct != int(pct):
+            st.error(f"All allocations must be whole numbers. {interval} has {pct}%")
+            is_valid = False
+            break
+
+    # Check for 0% or 10-50% range
+    for interval, pct in alloc_dict.items():
+        if pct > 0 and pct < 10:
+            st.error(f"Each interval must be 0% OR between 10-50%. {interval} has {pct}% (below 10% minimum)")
+            is_valid = False
+            break
+
+    if abs(total_pct - 100) > 0.01:
         st.error(f"Allocation must total 100%. Current total: {total_pct:.0f}%")
         is_valid = False
-    
+
     if max_pct > 50:
         st.error(f"No interval can exceed 50%.")
         is_valid = False
 
-    for i in range(len(INTERVAL_ORDER_11) - 1): # Stops before Nov-Dec
+    for i in range(len(INTERVAL_ORDER_11) - 1):  # Stops before Nov-Dec
         if alloc_dict[INTERVAL_ORDER_11[i]] > 0 and alloc_dict[INTERVAL_ORDER_11[i+1]] > 0:
             st.error(f"Cannot allocate to adjacent intervals: {INTERVAL_ORDER_11[i]} and {INTERVAL_ORDER_11[i+1]}")
             is_valid = False
             break
-            
+
     if is_valid:
-        st.success(f"✅ Valid. Total: {total_pct:.0f}%")
+        st.success(f"Valid. Total: {total_pct:.0f}%")
 
     alloc_dict_float = {k: v / 100.0 for k, v in alloc_dict.items()}
-    
+
     return alloc_dict_float, is_valid
 
 
@@ -1269,20 +1287,20 @@ def render_tab3(session, grid_id, intended_use, productivity_factor, total_insur
 # =============================================================================
 def render_tab5(session, grid_id, intended_use, productivity_factor, total_insured_acres, plan_code):
     st.subheader("Portfolio Backtesting Engine")
-    
+
     # === PRESET LOADING BUTTON ===
     col1, col2 = st.columns([1, 3])
     with col1:
-        if st.button("📋 Load King Ranch", key="tab5_load_kr"):
+        if st.button("Load King Ranch", key="tab5_load_kr"):
             try:
                 all_grids_for_preset = load_distinct_grids(session)
-                
+
                 # Build mapping of numeric IDs to their proper county names from preset
                 target_grid_mapping = {}
                 for county, grid_ids in KING_RANCH_PRESET['counties'].items():
                     for grid_id_num in grid_ids:
                         target_grid_mapping[grid_id_num] = f"{grid_id_num} ({county} - TX)"
-                
+
                 # Match grids in the order from preset
                 preset_grid_ids = []
                 for numeric_id in KING_RANCH_PRESET['grids']:
@@ -1300,14 +1318,15 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                                 break
                         if not found:
                             st.warning(f"Could not find grid {numeric_id}")
-                
+
                 st.session_state.tab5_grids = preset_grid_ids
-                
+                st.session_state.tab5_use_custom_acres = True  # Enable custom acres for King Ranch
+
                 # Set acres for each grid
                 for gid in preset_grid_ids:
                     numeric_id = extract_numeric_grid_id(gid)
                     st.session_state[f"tab5_acres_{gid}"] = KING_RANCH_PRESET['acres'][numeric_id]
-                
+
                 # Set allocations via preset keys (NOT editor keys)
                 for gid in preset_grid_ids:
                     numeric_id = extract_numeric_grid_id(gid)
@@ -1315,30 +1334,30 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                     # Convert percentages to decimals and store in preset key
                     alloc_decimal = {interval: float(alloc.get(interval, 0.0)) / 100.0 for interval in INTERVAL_ORDER_11}
                     st.session_state[f"tab5_grid_{gid}_preset_allocation"] = alloc_decimal
-                
+
                 # Set King Ranch specific parameters
                 st.session_state.productivity_factor = 1.35  # 135%
                 st.session_state.tab5_coverage = 0.75  # 75% coverage
-                
-                st.success("✅ King Ranch loaded! (8 grids, 135% productivity, 75% coverage)")
+
+                st.success("King Ranch loaded! (8 grids, 135% productivity, 75% coverage)")
                 st.rerun()
-                
+
             except Exception as e:
                 st.error(f"Error loading King Ranch: {e}")
                 st.exception(e)
-    
+
     with col2:
         st.caption("Auto-populate King Ranch strategy")
-    
+
     st.divider()
-    
+
     try:
         all_grids = load_distinct_grids(session)
     except:
         all_grids = [grid_id]
-    
+
     default_grids = st.session_state.get('tab5_grids', [grid_id])
-    
+
     selected_grids = st.multiselect(
         "Select Grids",
         options=all_grids,
@@ -1346,48 +1365,99 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
         max_selections=20,
         key="tab5_grids"
     )
-    
+
     if not selected_grids:
         st.warning("Select at least one grid")
         return
-    
-    st.subheader("Parameters")
-    
-    col1, col2, col3 = st.columns(3)
-    start_year = col1.selectbox("Start Year", list(range(1948, 2026)), index=62, key="tab5_start")
-    end_year = col2.selectbox("End Year", list(range(1948, 2026)), index=77, key="tab5_end")
-    coverage_level = col3.selectbox("Coverage Level", [0.70, 0.75, 0.80, 0.85, 0.90], index=2, format_func=lambda x: f"{x:.0%}", key="tab5_coverage")
 
     st.divider()
-    
-    st.subheader(f"Acres for {len(selected_grids)} Grid(s)")
-    
-    grid_acres = {}
-    cols = st.columns(min(4, len(selected_grids)))
-    for idx, gid in enumerate(selected_grids):
-        with cols[idx % 4]:
-            grid_acres[gid] = st.number_input(
-                f"Grid {gid}",
-                min_value=1,
-                value=total_insured_acres,
-                step=10,
-                key=f"tab5_acres_{gid}"
-            )
-    
+
+    # === SCENARIO DEFINITION SECTION (NEW) ===
+    st.markdown("#### Scenario Definition")
+
+    scenario_options = [
+        'All Years (except Current Year)',
+        'ENSO Phase: La Nina',
+        'ENSO Phase: El Nino',
+        'ENSO Phase: Neutral',
+        'Select my own interval'
+    ]
+
+    selected_scenario = st.radio(
+        "Select one scenario to backtest:",
+        options=scenario_options,
+        index=0,
+        key='tab5_scenario_select'
+    )
+
+    # Conditional year range display - only show if "Select my own interval" is chosen
+    start_year = 1948
+    end_year = 2024
+    if selected_scenario == 'Select my own interval':
+        col1, col2 = st.columns(2)
+        start_year = col1.selectbox("Start Year", list(range(1948, 2026)), index=62, key="tab5_start")
+        end_year = col2.selectbox("End Year", list(range(1948, 2026)), index=76, key="tab5_end")
+
     st.divider()
-    
+
+    # === PARAMETERS SECTION ===
+    st.subheader("Parameters")
+    coverage_level = st.selectbox(
+        "Coverage Level",
+        [0.70, 0.75, 0.80, 0.85, 0.90],
+        index=2,
+        format_func=lambda x: f"{x:.0%}",
+        key="tab5_coverage"
+    )
+
+    st.divider()
+
+    # === ACRE CONFIGURATION SECTION ===
+    st.subheader("Acre Configuration")
+
+    use_custom_acres = st.checkbox(
+        "Configure acres per grid",
+        value=st.session_state.get('tab5_use_custom_acres', False),
+        key="tab5_use_custom_acres"
+    )
+
+    grid_acres = {}
+    if use_custom_acres:
+        cols = st.columns(min(4, len(selected_grids)))
+        for idx, gid in enumerate(selected_grids):
+            with cols[idx % 4]:
+                # Check if King Ranch preset exists for this grid
+                numeric_id = extract_numeric_grid_id(gid)
+                default_acres = st.session_state.get(f"tab5_acres_{gid}", KING_RANCH_PRESET['acres'].get(numeric_id, total_insured_acres))
+                grid_acres[gid] = st.number_input(
+                    f"{gid}",
+                    min_value=1,
+                    value=default_acres,
+                    step=10,
+                    key=f"tab5_acres_{gid}"
+                )
+    else:
+        # Show info message about equal distribution
+        acres_per_grid = total_insured_acres // len(selected_grids)
+        st.info(f"Using {total_insured_acres:,} acres from Common Parameters, equally distributed across {len(selected_grids)} grids ({acres_per_grid:,} acres per grid)")
+        for gid in selected_grids:
+            grid_acres[gid] = acres_per_grid
+
+    st.divider()
+
+    # === ALLOCATIONS SECTION ===
     st.subheader(f"Allocations for {len(selected_grids)} Grid(s)")
-    
+
     grid_allocations = {}
     all_valid = True
-    
+
     for gid in selected_grids:
-        with st.expander(f"📍 {gid} ({grid_acres[gid]:,} acres)", expanded=len(selected_grids) == 1):
+        with st.expander(f"{gid} ({grid_acres[gid]:,} acres)", expanded=len(selected_grids) == 1):
             alloc_dict, is_valid = render_allocation_inputs(f"tab5_grid_{gid}")
             grid_allocations[gid] = alloc_dict
             if not is_valid:
                 all_valid = False
-    
+
     st.divider()
 
     if 'tab5_run' not in st.session_state:
@@ -1397,11 +1467,11 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
         st.session_state.tab5_run = True
         try:
             grid_results = {}
-            
+            years_used = []
+
             with st.spinner(f"Running backtest for {len(selected_grids)} grids..."):
                 for gid in selected_grids:
                     try:
-                        coverage_level_string = f"{coverage_level:.0%}"
                         subsidy_percent = load_subsidies(session, plan_code, [coverage_level])[coverage_level]
                         county_base_value = load_county_base_value(session, gid)
                         current_rate_year = get_current_rate_year(session)
@@ -1410,13 +1480,40 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                         dollar_amount_of_protection = round(dollar_amount_of_protection, 2)
                         total_policy_protection = dollar_amount_of_protection * grid_acres[gid]
                         all_indices_df = load_all_indices(session, gid)
-                        
+
+                        # Apply scenario-based year filtering
+                        if selected_scenario == 'All Years (except Current Year)':
+                            filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
+                        elif selected_scenario == 'ENSO Phase: La Nina':
+                            if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
+                                filtered_df = all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'La Nina') & (all_indices_df['YEAR'] < 2025)]
+                            else:
+                                filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
+                                st.warning(f"ENSO data not available for {gid}, using all years")
+                        elif selected_scenario == 'ENSO Phase: El Nino':
+                            if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
+                                filtered_df = all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'El Nino') & (all_indices_df['YEAR'] < 2025)]
+                            else:
+                                filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
+                                st.warning(f"ENSO data not available for {gid}, using all years")
+                        elif selected_scenario == 'ENSO Phase: Neutral':
+                            if 'OPTICAL_MAPPING_CPC' in all_indices_df.columns:
+                                filtered_df = all_indices_df[(all_indices_df['OPTICAL_MAPPING_CPC'] == 'Neutral') & (all_indices_df['YEAR'] < 2025)]
+                            else:
+                                filtered_df = all_indices_df[all_indices_df['YEAR'] < 2025]
+                                st.warning(f"ENSO data not available for {gid}, using all years")
+                        else:  # Select my own interval
+                            filtered_df = all_indices_df[(all_indices_df['YEAR'] >= start_year) & (all_indices_df['YEAR'] <= end_year)]
+
+                        # Get unique years for this grid
+                        grid_years = filtered_df['YEAR'].unique()
+
                         year_results = []
-                        for year in range(start_year, end_year + 1):
-                            actuals_df = all_indices_df[all_indices_df['YEAR'] == year].set_index('INTERVAL_NAME')
+                        for year in sorted(grid_years):
+                            actuals_df = filtered_df[filtered_df['YEAR'] == year].set_index('INTERVAL_NAME')
                             if actuals_df.empty:
                                 continue
-                            
+
                             roi_df = pd.DataFrame(index=INTERVAL_ORDER_11)
                             roi_df['Percent of Value'] = roi_df.index.map(grid_allocations[gid])
                             roi_df['Policy Protection Per Unit'] = total_policy_protection * roi_df['Percent of Value']
@@ -1433,38 +1530,51 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                             total_indemnity = roi_df['Estimated Indemnity'].apply(lambda x: round(x, 0)).sum()
                             total_producer_prem = roi_df['Producer Premium'].apply(lambda x: round(x, 0)).sum()
                             year_roi = (total_indemnity - total_producer_prem) / total_producer_prem if total_producer_prem > 0 else 0.0
-                            
+
                             year_results.append({
                                 'Year': year, 'Total Indemnity': total_indemnity, 'Producer Premium': total_producer_prem,
                                 'Net Return': total_indemnity - total_producer_prem, 'Total ROI': year_roi
                             })
-                        
+                            if year not in years_used:
+                                years_used.append(year)
+
                         results_df = pd.DataFrame(year_results)
                         grid_results[gid] = {
                             'results_df': results_df,
                             'allocation': grid_allocations[gid]
                         }
-                        
+
                     except Exception as e:
                         st.error(f"Grid {gid}: {str(e)}")
+
+            # Determine display year range
+            if years_used:
+                display_start = min(years_used)
+                display_end = max(years_used)
+            else:
+                display_start = start_year
+                display_end = end_year
 
             st.session_state.tab5_results = {
                 "grid_results": grid_results,
                 "selected_grids": selected_grids,
                 "grid_acres": grid_acres,
-                "start_year": start_year,
-                "end_year": end_year,
+                "grid_allocations": grid_allocations,
+                "start_year": display_start,
+                "end_year": display_end,
                 "coverage_level": coverage_level,
                 "productivity_factor": productivity_factor,
                 "intended_use": intended_use,
                 "total_insured_acres": total_insured_acres,
-                "current_rate_year": current_rate_year
+                "current_rate_year": current_rate_year,
+                "scenario": selected_scenario,
+                "years_used": sorted(years_used)
             }
             st.session_state.tab1_results = None
             st.session_state.tab2_results = None
             st.session_state.tab3_results = None
             st.session_state.tab4_results = None
-            
+
         except Exception as e:
             st.error(f"Error: {e}")
             st.exception(e)
@@ -1473,38 +1583,93 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
     if 'tab5_results' in st.session_state and st.session_state.tab5_results:
         try:
             r = st.session_state.tab5_results
-            
+
             st.header(f"Portfolio Results ({r['start_year']}-{r['end_year']})")
-            st.caption(f"Coverage: {r['coverage_level']:.0%} | Productivity: {r['productivity_factor']:.0%} | Use: {r['intended_use']}")
-            
+            st.caption(f"Scenario: {r.get('scenario', 'All Years')} | Coverage: {r['coverage_level']:.0%} | Productivity: {r['productivity_factor']:.0%} | Use: {r['intended_use']}")
+
+            if r.get('years_used'):
+                st.caption(f"Years included: {len(r['years_used'])} ({min(r['years_used'])}-{max(r['years_used'])})")
+
+            # === PORTFOLIO COVERAGE TABLE (NEW) ===
+            if len(r['selected_grids']) > 1:
+                st.subheader("Portfolio Coverage")
+
+                coverage_data = []
+                total_coverage = {interval: 0 for interval in INTERVAL_ORDER_11}
+                total_portfolio_acres = sum(r['grid_acres'].values())
+
+                for gid in r['selected_grids']:
+                    if gid in r['grid_results']:
+                        allocation = r['grid_results'][gid]['allocation']
+                        row = {'Grid': str(gid)[:20]}
+                        row_sum = 0
+
+                        for interval in INTERVAL_ORDER_11:
+                            pct = allocation.get(interval, 0) * 100
+                            row_sum += pct
+                            total_coverage[interval] += pct
+                            row[interval] = f"{pct:.0f}%" if pct > 0 else "--"
+
+                        row['Row Sum'] = f"{row_sum:.0f}%"
+                        row['Acres'] = f"{r['grid_acres'].get(gid, 0):,.0f}"
+                        coverage_data.append(row)
+
+                # Add average row
+                avg_row = {'Grid': 'AVERAGE'}
+                avg_row_sum = 0
+                valid_grids_count = len([gid for gid in r['selected_grids'] if gid in r['grid_results']])
+                for interval in INTERVAL_ORDER_11:
+                    pct = total_coverage[interval] / valid_grids_count if valid_grids_count > 0 else 0
+                    avg_row_sum += pct
+                    avg_row[interval] = f"{pct:.0f}%" if pct > 0.5 else "--"
+                avg_row['Row Sum'] = f"{avg_row_sum:.0f}%"
+                avg_row['Acres'] = f"{total_portfolio_acres:,.0f}"
+                coverage_data.append(avg_row)
+
+                coverage_df = pd.DataFrame(coverage_data)
+
+                # CSV Download Button for coverage
+                csv_coverage = coverage_df.to_csv(index=False)
+                st.download_button(
+                    label="Download Coverage CSV",
+                    data=csv_coverage,
+                    file_name=f"portfolio_coverage_{r['start_year']}-{r['end_year']}.csv",
+                    mime="text/csv",
+                    key="tab5_coverage_csv"
+                )
+
+                st.dataframe(coverage_df, use_container_width=True, hide_index=True)
+
+                st.divider()
+
             st.subheader("Cumulative Results by Grid")
-            
+
             combined_data = []
             portfolio_total_premium = 0
             portfolio_total_indemnity = 0
             portfolio_total_net_return = 0
             year_rois_all_grids = []
-            
+
             for gid in r['selected_grids']:
                 if gid in r['grid_results']:
                     results_df = r['grid_results'][gid]['results_df']
-                    
+
                     total_indemnity = results_df['Total Indemnity'].sum()
                     total_premium = results_df['Producer Premium'].sum()
                     net_return = results_df['Net Return'].sum()
                     cumulative_roi = net_return / total_premium if total_premium > 0 else 0
-                    
+
                     year_rois = results_df['Total ROI'].values
                     std_dev = np.std(year_rois) if len(year_rois) > 0 else 0
                     risk_adj_ret = cumulative_roi / std_dev if std_dev > 0 else 0
-                    
+
                     portfolio_total_premium += total_premium
                     portfolio_total_indemnity += total_indemnity
                     portfolio_total_net_return += net_return
                     year_rois_all_grids.extend(year_rois)
-                    
+
                     grid_acres_val = r['grid_acres'].get(gid, 0)
-                    
+
                     combined_data.append({
                         'Grid': str(gid)[:20],
                         'Acres': grid_acres_val,
@@ -1515,64 +1680,66 @@ def render_tab5(session, grid_id, intended_use, productivity_factor, total_insur
                         'Std Dev': std_dev,
                         'Risk-Adj Return': risk_adj_ret
                     })
-            
+
             # CSV Download Button
             csv_df = pd.DataFrame(combined_data)
             csv_export = csv_df.to_csv(index=False)
-            
+
             st.download_button(
-                label="📥 Download CSV",
+                label="Download Results CSV",
                 data=csv_export,
                 file_name=f"portfolio_results_{r['start_year']}-{r['end_year']}.csv",
                 mime="text/csv",
+                key="tab5_results_csv"
             )
-            
+
             # === FORMATTED TABLE ===
             st.text("Grid                  Acres   Total Premium    Total Indemnity       Net Return        Cum ROI        Std Dev       Risk-Adj")
-            st.text("─" * 145)
-            
+            st.text("-" * 145)
+
             for row in combined_data:
                 line = f"{row['Grid']:<20} {row['Acres']:>7,} {row['Total Premium']:>16,.0f} {row['Total Indemnity']:>17,.0f} {row['Net Return']:>16,.0f} {row['Cumulative ROI']:>14.2%} {row['Std Dev']:>13.2%} {row['Risk-Adj Return']:>13.2f}"
                 st.text(line)
-            
-            st.text("─" * 145)
-            totals_line = f"{'TOTAL':<20} {'':>7} {portfolio_total_premium:>16,.0f} {portfolio_total_indemnity:>17,.0f} {portfolio_total_net_return:>16,.0f} {'':>14} {'':>13} {'':>13}"
+
+            st.text("-" * 145)
+            total_acres = sum(r['grid_acres'].values())
+            totals_line = f"{'TOTAL':<20} {total_acres:>7,} {portfolio_total_premium:>16,.0f} {portfolio_total_indemnity:>17,.0f} {portfolio_total_net_return:>16,.0f} {'':>14} {'':>13} {'':>13}"
             st.text(totals_line)
-            st.text("═" * 145)
-            
+            st.text("=" * 145)
+
             st.divider()
             st.subheader("Portfolio Metrics")
-            
+
             portfolio_roi = portfolio_total_net_return / portfolio_total_premium if portfolio_total_premium > 0 else 0
-            
+
             if len(year_rois_all_grids) > 0:
                 portfolio_std_dev = np.std(year_rois_all_grids)
                 portfolio_risk_adj = portfolio_roi / portfolio_std_dev if portfolio_std_dev > 0 else 0
             else:
                 portfolio_std_dev = 0
                 portfolio_risk_adj = 0
-            
+
             c1, c2 = st.columns(2)
             c1.metric("Portfolio ROI", f"{portfolio_roi:.2%}")
             c2.metric("Risk-Adjusted Return", f"{portfolio_risk_adj:.2f}")
-            
+
             st.divider()
             st.subheader("Details by Grid")
-            
+
             for gid in r['selected_grids']:
                 if gid in r['grid_results']:
                     with st.expander(f"{gid} ({r['grid_acres'].get(gid, 0):,} acres)"):
                         results_df = r['grid_results'][gid]['results_df']
                         allocation = r['grid_results'][gid]['allocation']
-                        
+
                         alloc_display = {k: f"{v*100:.0f}%" for k, v in allocation.items() if v > 0}
                         st.text(f"Allocation: {', '.join([f'{k}: {v}' for k, v in alloc_display.items()])}")
-                        
+
                         st.dataframe(results_df.style.format({
                             'Year': '{:.0f}', 'Total Indemnity': '${:,.0f}',
                             'Producer Premium': '${:,.0f}', 'Net Return': '${:,.0f}', 'Total ROI': '{:.2%}'
                         }), use_container_width=True)
-        
+
         except Exception as e:
             st.error(f"Error: {e}")
             st.exception(e)
