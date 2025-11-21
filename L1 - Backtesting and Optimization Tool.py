@@ -494,16 +494,22 @@ MIN_ALLOCATION = 0.10
 # Number of intervals (11 bi-monthly periods)
 INTERVAL_RANGE = 11
 
-def generate_random_valid_allocation(min_allocation=MIN_ALLOCATION, interval_range=INTERVAL_RANGE):
+def generate_random_valid_allocation(min_allocation=MIN_ALLOCATION, interval_range=INTERVAL_RANGE, interval_count_range=(2, 6)):
     """
     Generate a random valid allocation as a numpy array.
     Rules: 10-50% per interval, non-adjacent, total = 100%.
     Returns numpy array of length 11.
+
+    Args:
+        min_allocation: Minimum allocation per interval (default 0.10)
+        interval_range: Total number of intervals (default 11)
+        interval_count_range: Tuple of (min, max) number of active intervals (default (2, 6))
     """
     weights = np.zeros(interval_range)
 
-    # Randomly select 3-6 non-adjacent intervals
-    num_intervals = random.choice([3, 4, 5, 6])
+    # Randomly select intervals within the specified range
+    min_count, max_count = interval_count_range
+    num_intervals = random.randint(min_count, max_count)
     available = list(range(interval_range))
     selected = []
 
@@ -527,6 +533,54 @@ def generate_random_valid_allocation(min_allocation=MIN_ALLOCATION, interval_ran
         selected = [2, 4, 8]  # Mar-Apr, May-Jun, Sep-Oct
 
     # Generate random percentages
+    remaining = 100
+    for i, idx in enumerate(selected[:-1]):
+        max_pct = min(50, remaining - min_allocation * 100 * (len(selected) - i - 1))
+        min_pct = max(min_allocation * 100, remaining - 50 * (len(selected) - i - 1))
+
+        if min_pct > max_pct:
+            pct = min_pct
+        else:
+            pct = random.randint(int(min_pct), int(max_pct))
+
+        weights[idx] = pct / 100.0
+        remaining -= pct
+
+    # Last interval gets remainder
+    if remaining >= 10 and remaining <= 50:
+        weights[selected[-1]] = remaining / 100.0
+    else:
+        weights[selected[-1]] = 0.20
+        # Normalize
+        if weights.sum() > 0:
+            weights = weights / weights.sum()
+
+    return weights
+
+def generate_full_coverage_allocation(grid_index, min_allocation=MIN_ALLOCATION, interval_range=INTERVAL_RANGE):
+    """
+    Generate allocation for full calendar coverage mode.
+    Uses staggered Pattern A (6 intervals) and Pattern B (5 intervals)
+    to cover all 11 intervals while maintaining non-adjacency within each grid.
+
+    Args:
+        grid_index: Index of the grid (0 or 1 to determine pattern)
+        min_allocation: Minimum allocation per interval (default 0.10)
+        interval_range: Total number of intervals (default 11)
+
+    Returns:
+        numpy array of length 11 with valid allocation
+    """
+    weights = np.zeros(interval_range)
+
+    # Pattern A: Even positions (0, 2, 4, 6, 8, 10) - 6 intervals
+    # Pattern B: Odd positions (1, 3, 5, 7, 9) - 5 intervals
+    if grid_index % 2 == 0:
+        selected = [0, 2, 4, 6, 8, 10]  # Pattern A - 6 intervals
+    else:
+        selected = [1, 3, 5, 7, 9]  # Pattern B - 5 intervals
+
+    # Generate random percentages within bounds (10-50% each)
     remaining = 100
     for i, idx in enumerate(selected[:-1]):
         max_pct = min(50, remaining - min_allocation * 100 * (len(selected) - i - 1))
@@ -707,7 +761,8 @@ def calculate_vectorized_roi(weights_batch, index_matrix, premium_rates_array,
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_fast_optimization_core(
     _session, grid_id, start_year, end_year, plan_code, productivity_factor,
-    acres, intended_use, coverage_level, iterations, search_mode
+    acres, intended_use, coverage_level, iterations, search_mode,
+    require_full_coverage=False, interval_range_opt=(2, 6), grid_index=0
 ):
     """
     Core optimization function with caching.
@@ -723,6 +778,9 @@ def run_fast_optimization_core(
         coverage_level: Coverage level (e.g., 0.80)
         iterations: Number of iterations for global search
         search_mode: 'global' or 'marginal'
+        require_full_coverage: If True, use Pattern A/B for full calendar coverage
+        interval_range_opt: Tuple of (min, max) active intervals when not using full coverage
+        grid_index: Grid index for determining Pattern A/B in full coverage mode
 
     Returns:
         Tuple of (best_allocation_dict, best_roi, strategies_tested)
@@ -761,10 +819,14 @@ def run_fast_optimization_core(
         premium_rates.get(interval, 0) for interval in INTERVAL_ORDER_11
     ])
 
-    # Generate candidates based on search mode
+    # Generate candidates based on search mode and diversification constraints
     candidates = []
 
-    if search_mode == 'marginal':
+    if require_full_coverage:
+        # Full calendar coverage mode - use Pattern A or B based on grid index
+        for _ in range(iterations):
+            candidates.append(generate_full_coverage_allocation(grid_index))
+    elif search_mode == 'marginal':
         # Start from naive allocation and perturb
         naive_weights = generate_naive_weights()
         candidates.append(naive_weights)
@@ -776,9 +838,9 @@ def run_fast_optimization_core(
             new_candidate = generate_marginal_candidate(base.copy())
             candidates.append(new_candidate)
     else:
-        # Global search - random valid allocations
+        # Global search - random valid allocations with custom interval range
         for _ in range(iterations):
-            candidates.append(generate_random_valid_allocation())
+            candidates.append(generate_random_valid_allocation(interval_count_range=interval_range_opt))
 
     # Convert to batch array: (n_candidates, 11)
     weights_batch = np.array(candidates)
@@ -2443,6 +2505,35 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
             search_mode = 'global'
         st.caption(f"{search_iterations:,} iterations (Global Search)")
 
+    # Diversification Constraints
+    st.markdown("**Diversification Constraints:**")
+    div_col1, div_col2 = st.columns(2)
+
+    with div_col1:
+        require_full_coverage = st.checkbox(
+            "📅 Ensure Full Calendar Coverage",
+            value=False,
+            help="Creates staggered portfolio with Pattern A (6 intervals) and Pattern B (5 intervals) to cover all 11 intervals while maintaining non-adjacency. Requires at least 2 grids.",
+            key="ps_challenger_full_coverage"
+        )
+
+    with div_col2:
+        if not require_full_coverage:
+            interval_range_opt = st.slider(
+                "Number of Active Intervals Range",
+                min_value=2,
+                max_value=6,
+                value=(2, 6),
+                help="Optimizer can choose ANY number of intervals within this range. Each interval must have 10%-50%.",
+                key="ps_challenger_interval_range"
+            )
+        else:
+            interval_range_opt = (11, 11)  # Full coverage uses all intervals via Pattern A/B
+            st.info("Full coverage mode: Pattern A (6) + Pattern B (5) = 11 intervals")
+
+    st.caption("Diversification controls how interval allocations are spread across your portfolio. "
+               "Full Calendar Coverage ensures year-round protection by using complementary patterns across grids.")
+
     st.markdown("---")
 
     # Layer 2: Acreage Optimization (MVO)
@@ -2517,7 +2608,10 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                     best_alloc, best_roi, tested = run_fast_optimization_core(
                         session, gid, start_year, end_year, plan_code,
                         productivity_factor, champion_acres[gid], intended_use,
-                        coverage_level, search_iterations, search_mode
+                        coverage_level, search_iterations, search_mode,
+                        require_full_coverage=require_full_coverage,
+                        interval_range_opt=interval_range_opt,
+                        grid_index=idx
                     )
 
                     if best_alloc:
