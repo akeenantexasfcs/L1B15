@@ -2469,13 +2469,21 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     # CALLBACK FUNCTIONS (Must be defined before widgets that use them)
     # ==========================================================================
     def load_king_ranch_callback():
-        """Simple callback that just sets a flag - actual loading happens in main function."""
+        """
+        Callback for King Ranch preset button.
+        Sets simple session state values immediately (before page reruns),
+        and sets a flag for grid loading which requires database access.
+        """
+        # Set these IMMEDIATELY so sidebar widgets pick up new values on rerun
+        st.session_state.productivity_factor = 1.35
+        st.session_state.ps_coverage = 0.75  # Set to 75% coverage
+        # Flag for deferred grid loading (requires database session)
         st.session_state.ps_kr_load_requested = True
 
     st.subheader("Portfolio Strategy: Champion vs. Challenger")
 
     # ==========================================================================
-    # DEFERRED KING RANCH LOADING (executed where session is available)
+    # DEFERRED KING RANCH LOADING (grid loading requires database session)
     # ==========================================================================
     if st.session_state.get('ps_kr_load_requested', False):
         try:
@@ -2497,10 +2505,8 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                             preset_grid_ids.append(grid_option)
                             break
 
-            # Set session state values
+            # Set grid-related session state values (these require DB lookup first)
             st.session_state.ps_grids = preset_grid_ids
-            st.session_state.productivity_factor = 1.35
-            st.session_state.ps_coverage = 0.75  # Set to 75% coverage
 
             # Set acres for each grid
             for gid in preset_grid_ids:
