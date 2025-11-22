@@ -2604,81 +2604,95 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
         if len(selected_grids) < 2:
             st.info("Select at least two grids to view correlations.")
         else:
-            try:
-                # Calculate yearly ROI for each grid using current allocation settings
-                # This mirrors the logic in generate_base_data_for_mvo for consistency
-                all_roi_data = []
+            st.caption("Calculate ROI correlations to see diversification potential. Lower correlations suggest better diversification benefits.")
 
-                for gid in selected_grids:
-                    # Try to get allocation from session state, otherwise use default
-                    preset_key = f"ps_champ_{gid}_preset_allocation"
-                    if preset_key in st.session_state:
-                        allocation = st.session_state[preset_key]
-                    else:
-                        # Default allocation (Jan-Feb 50%, Mar-Apr 50%)
-                        allocation = {interval: 0.0 for interval in INTERVAL_ORDER_11}
-                        allocation['Jan-Feb'] = 0.50
-                        allocation['Mar-Apr'] = 0.50
+            # Use a button to trigger calculation (performance optimization)
+            if st.button("Calculate ROI Correlations", key="ps_calc_correlations"):
+                try:
+                    with st.spinner("Calculating ROI correlations..."):
+                        # Calculate yearly ROI for each grid using current allocation settings
+                        # This mirrors the logic in generate_base_data_for_mvo for consistency
+                        all_roi_data = []
 
-                    # Calculate ROI for each year in the scenario range
-                    for year in range(start_year, end_year + 1):
-                        roi, indemnity, premium = calculate_yearly_roi_for_grid(
-                            session, gid, year, allocation, coverage_level,
-                            productivity_factor, intended_use, plan_code,
-                            acres=1  # Normalize to per-acre
-                        )
+                        for gid in selected_grids:
+                            # Try to get allocation from session state, otherwise use default
+                            preset_key = f"ps_champ_{gid}_preset_allocation"
+                            if preset_key in st.session_state:
+                                allocation = st.session_state[preset_key]
+                            else:
+                                # Default allocation (Jan-Feb 50%, Mar-Apr 50%)
+                                allocation = {interval: 0.0 for interval in INTERVAL_ORDER_11}
+                                allocation['Jan-Feb'] = 0.50
+                                allocation['Mar-Apr'] = 0.50
 
-                        all_roi_data.append({
-                            'Year': year,
-                            'Grid ID': gid,
-                            'ROI': roi
-                        })
+                            # Calculate ROI for each year in the scenario range
+                            for year in range(start_year, end_year + 1):
+                                roi, indemnity, premium = calculate_yearly_roi_for_grid(
+                                    session, gid, year, allocation, coverage_level,
+                                    productivity_factor, intended_use, plan_code,
+                                    acres=1  # Normalize to per-acre
+                                )
 
-                if all_roi_data:
-                    # Create DataFrame and pivot for correlation calculation
-                    roi_df = pd.DataFrame(all_roi_data)
+                                all_roi_data.append({
+                                    'Year': year,
+                                    'Grid ID': gid,
+                                    'ROI': roi
+                                })
 
-                    # Pivot so rows are years and columns are Grid IDs
-                    pivot_df = roi_df.pivot_table(
-                        values='ROI',
-                        index='Year',
-                        columns='Grid ID',
-                        aggfunc='mean'
-                    )
+                        if all_roi_data:
+                            # Create DataFrame and pivot for correlation calculation
+                            roi_df = pd.DataFrame(all_roi_data)
 
-                    # Calculate correlation matrix
-                    corr_matrix = pivot_df.corr()
+                            # Pivot so rows are years and columns are Grid IDs
+                            pivot_df = roi_df.pivot_table(
+                                values='ROI',
+                                index='Year',
+                                columns='Grid ID',
+                                aggfunc='mean'
+                            )
 
-                    # Generate heatmap
-                    import matplotlib.pyplot as plt
-                    import seaborn as sns
+                            # Calculate correlation matrix
+                            corr_matrix = pivot_df.corr()
 
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    sns.heatmap(
-                        corr_matrix,
-                        annot=True,
-                        cmap='RdYlGn_r',  # Reversed: red=high correlation (bad), green=low (good for diversification)
-                        fmt=".2f",
-                        vmin=-1,
-                        vmax=1,
-                        center=0,
-                        ax=ax,
-                        square=True,
-                        linewidths=0.5
-                    )
-                    ax.set_title(f"Grid ROI Correlations ({selected_scenario})", fontsize=12)
-                    plt.tight_layout()
+                            # Store in session state for display
+                            st.session_state.ps_roi_correlation_matrix = corr_matrix
+                            st.session_state.ps_roi_correlation_scenario = selected_scenario
+                        else:
+                            st.warning("No ROI data available for selected grids.")
 
-                    st.pyplot(fig)
-                    plt.close(fig)
+                except Exception as e:
+                    st.error(f"Error calculating ROI correlations: {e}")
 
-                    st.caption("ROI correlations based on current allocations. Lower correlations suggest better diversification benefits. "
-                              "This matches the correlation input used by the MVO acreage optimizer.")
-                else:
-                    st.warning("No ROI data available for selected grids.")
+            # Display cached correlation matrix if available
+            if 'ps_roi_correlation_matrix' in st.session_state and st.session_state.ps_roi_correlation_matrix is not None:
+                corr_matrix = st.session_state.ps_roi_correlation_matrix
+                cached_scenario = st.session_state.get('ps_roi_correlation_scenario', '')
 
-            except Exception as e:
-                st.error(f"Error generating ROI correlation heatmap: {e}")
+                # Generate heatmap
+                import matplotlib.pyplot as plt
+                import seaborn as sns
+
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.heatmap(
+                    corr_matrix,
+                    annot=True,
+                    cmap='RdYlGn_r',  # Reversed: red=high correlation (bad), green=low (good for diversification)
+                    fmt=".2f",
+                    vmin=-1,
+                    vmax=1,
+                    center=0,
+                    ax=ax,
+                    square=True,
+                    linewidths=0.5
+                )
+                ax.set_title(f"Grid ROI Correlations ({cached_scenario})", fontsize=12)
+                plt.tight_layout()
+
+                st.pyplot(fig)
+                plt.close(fig)
+
+                st.caption("This matches the correlation input used by the MVO acreage optimizer. "
+                          "Click 'Calculate' again if you've changed grids or settings.")
 
     # ==========================================================================
     # MIDDLE SECTION: THE CHAMPION (BASELINE)
