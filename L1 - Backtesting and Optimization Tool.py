@@ -2592,42 +2592,50 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
     st.divider()
 
     # ==========================================================================
-    # HISTORICAL GRID CORRELATIONS (Optional Analysis)
+    # HISTORICAL GRID ROI CORRELATIONS (Matches MVO optimization input)
     # ==========================================================================
-    with st.expander("📉 Historical Grid Correlations", expanded=False):
+    with st.expander("📉 Historical Grid ROI Correlations", expanded=False):
         if len(selected_grids) < 2:
             st.info("Select at least two grids to view correlations.")
         else:
             try:
-                # Collect index data for all selected grids
-                all_index_data = []
+                # Calculate yearly ROI for each grid using current allocation settings
+                # This mirrors the logic in generate_base_data_for_mvo for consistency
+                all_roi_data = []
+
                 for gid in selected_grids:
-                    grid_indices = load_all_indices(session, gid)
-
-                    # Apply scenario filter to match user's selected scenario
-                    if selected_scenario == 'Custom Range':
-                        filtered_indices = filter_indices_by_scenario(
-                            grid_indices, selected_scenario, start_year, end_year
-                        )
+                    # Try to get allocation from session state, otherwise use default
+                    preset_key = f"ps_champ_{gid}_preset_allocation"
+                    if preset_key in st.session_state:
+                        allocation = st.session_state[preset_key]
                     else:
-                        filtered_indices = filter_indices_by_scenario(
-                            grid_indices, selected_scenario
+                        # Default allocation (Jan-Feb 50%, Mar-Apr 50%)
+                        allocation = {interval: 0.0 for interval in INTERVAL_ORDER_11}
+                        allocation['Jan-Feb'] = 0.50
+                        allocation['Mar-Apr'] = 0.50
+
+                    # Calculate ROI for each year in the scenario range
+                    for year in range(start_year, end_year + 1):
+                        roi, indemnity, premium = calculate_yearly_roi_for_grid(
+                            session, gid, year, allocation, coverage_level,
+                            productivity_factor, intended_use, plan_code,
+                            acres=1  # Normalize to per-acre
                         )
 
-                    # Add Grid ID and create time period identifier
-                    filtered_indices = filtered_indices.copy()
-                    filtered_indices['Grid ID'] = gid
-                    filtered_indices['Period'] = filtered_indices['YEAR'].astype(str) + '-' + filtered_indices['INTERVAL_NAME']
-                    all_index_data.append(filtered_indices[['Period', 'Grid ID', 'INDEX_VALUE']])
+                        all_roi_data.append({
+                            'Year': year,
+                            'Grid ID': gid,
+                            'ROI': roi
+                        })
 
-                if all_index_data:
-                    # Combine all grid data
-                    combined_df = pd.concat(all_index_data, ignore_index=True)
+                if all_roi_data:
+                    # Create DataFrame and pivot for correlation calculation
+                    roi_df = pd.DataFrame(all_roi_data)
 
-                    # Pivot so rows are time periods and columns are Grid IDs
-                    pivot_df = combined_df.pivot_table(
-                        values='INDEX_VALUE',
-                        index='Period',
+                    # Pivot so rows are years and columns are Grid IDs
+                    pivot_df = roi_df.pivot_table(
+                        values='ROI',
+                        index='Year',
                         columns='Grid ID',
                         aggfunc='mean'
                     )
@@ -2643,7 +2651,7 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                     sns.heatmap(
                         corr_matrix,
                         annot=True,
-                        cmap='RdYlGn',
+                        cmap='RdYlGn_r',  # Reversed: red=high correlation (bad), green=low (good for diversification)
                         fmt=".2f",
                         vmin=-1,
                         vmax=1,
@@ -2652,19 +2660,19 @@ def render_portfolio_strategy_tab(session, grid_id, intended_use, productivity_f
                         square=True,
                         linewidths=0.5
                     )
-                    ax.set_title(f"Grid Index Correlations ({selected_scenario})", fontsize=12)
+                    ax.set_title(f"Grid ROI Correlations ({selected_scenario})", fontsize=12)
                     plt.tight_layout()
 
                     st.pyplot(fig)
                     plt.close(fig)
 
-                    st.caption("Correlations close to 1.0 indicate grids that perform similarly. "
-                              "Lower correlations suggest diversification benefits.")
+                    st.caption("ROI correlations based on current allocations. Lower correlations suggest better diversification benefits. "
+                              "This matches the correlation input used by the MVO acreage optimizer.")
                 else:
-                    st.warning("No index data available for selected grids.")
+                    st.warning("No ROI data available for selected grids.")
 
             except Exception as e:
-                st.error(f"Error generating correlation heatmap: {e}")
+                st.error(f"Error generating ROI correlation heatmap: {e}")
 
     # ==========================================================================
     # MIDDLE SECTION: THE CHAMPION (BASELINE)
